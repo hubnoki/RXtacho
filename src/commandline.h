@@ -28,7 +28,7 @@ typedef struct{
 
 extern const int n_commandline;
 
-extern COMMANDLINE_SET commandline_sets[];
+extern const COMMANDLINE_SET commandline_sets[];
 
 // get command, and execute command function
 // argument : command string (command argument should be separated by space character)

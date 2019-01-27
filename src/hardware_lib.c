@@ -307,7 +307,8 @@ void rx220_init_setup()
 	PORTH.PDR.BIT.B2 = 0;
 	PORTH.PMR.BIT.B2 = 0;
 	PORTH.PCR.BIT.B2 = 1;
-	ICU.IRQCR[1].BIT.IRQMD = 0x01; // Interrupt mode : falling edge
+//	ICU.IRQCR[1].BIT.IRQMD = 0x01; // Interrupt mode : falling edge
+	ICU.IRQCR[1].BIT.IRQMD = 0x03; // Interrupt mode : both edges
 	IR(ICU, IRQ1) = 0; // Clear IR flag
 	ICU.IRQFLTE0.BIT.FLTEN1 = 1; // Digital filter enable
 

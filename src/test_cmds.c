@@ -96,99 +96,99 @@ static bool gets_q(char *s, int n)
 //---- Debug commands -----------------------
 
 //---- List all valid commands ----//
-void test_command_list();
+static void test_command_list();
 
 //---- SD card test functions ----//
 #ifdef DEBUG_SD
 
-void test_cs();
-void test_tx();
-void test_txmulti();
+static void test_cs();
+static void test_tx();
+static void test_txmulti();
 
-void test_init();
-void test_sread();
-void test_swrite();
-void test_mread();
-void test_mwrite();
-void test_blocksize();
-void test_sectorcount();
+static void test_init();
+static void test_sread();
+static void test_swrite();
+static void test_mread();
+static void test_mwrite();
+static void test_blocksize();
+static void test_sectorcount();
 
 #endif // DEBUG_SD
 
 //---- File system functions ----//
 #ifdef DEBUG_FS
 
-void test_f_mount();
-void test_f_umount();
-void test_f_open(); // create new file
-void test_f_write();
-void test_f_stat();
+static void test_f_mount();
+static void test_f_umount();
+static void test_f_open(); // create new file
+static void test_f_write();
+static void test_f_stat();
 
-void test_pwd();
-void test_cd();
-void test_ls();
-void test_find();
-void test_cat();
-void test_mkdir();
-void test_rm();
+static void test_pwd();
+static void test_cd();
+static void test_ls();
+static void test_find();
+static void test_cat();
+static void test_mkdir();
+static void test_rm();
 
 #endif // DEBUG_FS
 
 //---- ADXL345 debug commands ----//
 #ifdef DEBUG_GSENS
 
-void test_adxl345_cs();
-void test_adxl345_tx();
-void test_adxl345_reg();
-void test_adxl345_mon();
-void test_adxl345_log();
-void test_adxl345_logf();
+static void test_adxl345_cs();
+static void test_adxl345_tx();
+static void test_adxl345_reg();
+static void test_adxl345_mon();
+static void test_adxl345_log();
+static void test_adxl345_logf();
 
 #endif // DEBUG_GSENS
 
 //---- LCD debug commands ----//
 #ifdef DEBUG_LCD
 
-void test_lcd_init();
-void test_lcd_cs();
-void test_lcd_rs();
-void test_lcd_tx();
-void test_lcd_fill();
+static void test_lcd_init();
+static void test_lcd_cs();
+static void test_lcd_rs();
+static void test_lcd_tx();
+static void test_lcd_fill();
 
-void test_lcd_clk();
-void test_lcd_rx();
+static void test_lcd_clk();
+static void test_lcd_rx();
 
-void test_lcd_area();
-void test_lcd_putc();
-void test_lcd_puts();
+static void test_lcd_area();
+static void test_lcd_putc();
+static void test_lcd_puts();
 
-void test_lcd_rinv();
-void test_lcd_cinv();
-void test_lcd_ainv();
+static void test_lcd_rinv();
+static void test_lcd_cinv();
+static void test_lcd_ainv();
 
 #ifdef ST7735S_REG_ACCESS
 
-void test_lcd_reg();
-void test_lcd_open();
-void test_lcd_write();
-void test_lcd_read();
-void test_lcd_close();
+static void test_lcd_reg();
+static void test_lcd_open();
+static void test_lcd_write();
+static void test_lcd_read();
+static void test_lcd_close();
 
 #endif // ST7735S_REG_ACCESS
 
 #endif // DEBUG_LCD
 
 //---- Miscellaneous tests ----//
-void test_misc();
+static void test_misc();
 
 //-------------------------------------------
 
-void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii);
+static void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii);
 unsigned char test_gpio(bool last, char opt);
 
 //-------------------------------------------
 
-COMMANDLINE_SET commandline_sets[] = {
+const COMMANDLINE_SET commandline_sets[] = {
 		{"command", 	test_command_list}
 #ifdef DEBUG_SD
 		, {"cs", 		test_cs}
@@ -260,7 +260,7 @@ const int n_commandline = (sizeof(commandline_sets) / sizeof(COMMANDLINE_SET));
 // command format : command
 // (no argument)
 // list all commands
-void test_command_list()
+static void test_command_list()
 {
 	int i;
 
@@ -282,7 +282,7 @@ void test_command_list()
 // a : 0, l, or L -> set sd_cs pin LOW
 //     1, h, or H -> set sd_cs pin HIGH
 //     other or not specified -> alternate sd_cs pin state
-void test_cs()
+static void test_cs()
 {
 	char s[20];
 	static bool last;
@@ -294,7 +294,7 @@ void test_cs()
 // command format : tx [a]
 // a : data to send to SD card in hexadecimal (00 ~ ff)
 //     up to 19 data are accepted (separated by space)
-void test_tx()
+static void test_tx()
 {
 	int i, n_bytes;
 	uint8_t tx_bytes[19], rx_bytes[19];
@@ -326,7 +326,7 @@ void test_tx()
 // command format : txmulti [a] [b]
 // a : data to send to SD card in hexadecimal (00 ~ ff)
 // b : count to send data (send data [a] for [b] times)
-void test_txmulti()
+static void test_txmulti()
 {
 	uint8_t data, rx_buf;
 	int count, i;
@@ -359,7 +359,7 @@ void test_txmulti()
 // command format : init
 // (no argument)
 // initialize SD card
-void test_init()
+static void test_init()
 {
 	SDC_INIT_RESULT res;
 
@@ -374,7 +374,7 @@ void test_init()
 // a : read address by sector in hexadecimal
 // b : "ascii" -> print the data to be translated by ascii code
 //     else or not specified : print the data by hexadecimal (00 ~ ff)
-void test_sread()
+static void test_sread()
 {
 	unsigned long addr;
 	SDC_RW_RESULT result;
@@ -415,7 +415,7 @@ void test_sread()
 // a : write address by sector in hexadecimal
 // b : "ascii" -> write data are specified by ascii characters
 //     else or not specified -> write data are specified by array of hexadecimal data
-void test_swrite()
+static void test_swrite()
 {
 	unsigned long addr;
 	SDC_RW_RESULT res;
@@ -499,7 +499,7 @@ void test_swrite()
 // a : read address by sector in hexadecimal
 // b : "ascii" -> print the data to be translated by ascii code
 //     else or not specified : print the data by hexadecimal (00 ~ ff)
-void test_mread()
+static void test_mread()
 {
 	unsigned long addr;
 	unsigned int count, i;
@@ -546,7 +546,7 @@ void test_mread()
 
 // command format : mwrite [a]
 // a : write address by sector in hexadecimal
-void test_mwrite()
+static void test_mwrite()
 {
 	unsigned long addr;
 	unsigned int count, i;
@@ -588,7 +588,7 @@ void test_mwrite()
 // command format : blocksize
 // (no argument)
 // get erase block count of SD card
-void test_blocksize()
+static void test_blocksize()
 {
 	unsigned long res;
 
@@ -600,7 +600,7 @@ void test_blocksize()
 // command format : blocksize
 // (no argument)
 // get sector count of SD card
-void test_sectorcount()
+static void test_sectorcount()
 {
 	unsigned long res;
 
@@ -617,7 +617,7 @@ void test_sectorcount()
 
 // command format : f_mount
 // media initialization is done in this function
-void test_f_mount()
+static void test_f_mount()
 {
 	FRESULT res;
 
@@ -630,7 +630,7 @@ void test_f_mount()
 }
 
 // command format : f_umount
-void test_f_umount()
+static void test_f_umount()
 {
 	FRESULT res;
 	res = f_mount(NULL, "SD1", 1);
@@ -639,7 +639,7 @@ void test_f_umount()
 
 // command format : pwd
 // (no argument)
-void test_pwd()
+static void test_pwd()
 {
 	FRESULT res;
 
@@ -653,7 +653,7 @@ void test_pwd()
 
 // command format : cd [a]
 // a : directory name
-void test_cd()
+static void test_cd()
 {
 	FRESULT res;
 
@@ -674,7 +674,7 @@ void test_cd()
 
 // command format : ls
 // (no argument)
-void test_ls()
+static void test_ls()
 {
 	FRESULT res;
 	TCHAR *fn;
@@ -730,7 +730,7 @@ void test_ls()
 
 // command format : find [a]
 // a : file or directory name matching pattern
-void test_find()
+static void test_find()
 {
 	FRESULT res;
 	char s[40];
@@ -764,7 +764,7 @@ void test_find()
 
 // command format : cat [a]
 // a : file name
-void test_cat()
+static void test_cat()
 {
 	FRESULT res;
 	unsigned int n_read;
@@ -805,7 +805,7 @@ void test_cat()
 // command format : f_open [a]
 // a : file name
 // create new file
-void test_f_open()
+static void test_f_open()
 {
 	FRESULT res;
 
@@ -833,7 +833,7 @@ void test_f_open()
 //     else or not specified -> write data are specified by array of hexadecimal data
 // c : "append" -> append to the end of the file
 //     else or not specified -> overwrite
-void test_f_write()
+static void test_f_write()
 {
 	FRESULT res;
 	bool ascii = false, append = false;
@@ -921,7 +921,7 @@ void test_f_write()
 
 }
 
-void test_mkdir()
+static void test_mkdir()
 {
 	FRESULT res;
 
@@ -938,7 +938,7 @@ void test_mkdir()
 
 }
 
-void test_f_stat()
+static void test_f_stat()
 {
     FRESULT fr;
 
@@ -978,7 +978,7 @@ void test_f_stat()
 
 // command format : rm [a]
 // a : file name
-void test_rm()
+static void test_rm()
 {
 	FRESULT res;
 
@@ -1014,7 +1014,7 @@ void test_rm()
 // a : 0, l, or L -> set sd_cs pin LOW
 //     1, h, or H -> set sd_cs pin HIGH
 //     other or not specified -> alternate sd_cs pin state
-void test_adxl345_cs()
+static void test_adxl345_cs()
 {
 	char s[20];
 	static bool last;
@@ -1026,7 +1026,7 @@ void test_adxl345_cs()
 // command format : adxl345_tx [a]
 // a : data to send to SD card in hexadecimal (00 ~ ff)
 //     up to 19 data are accepted (separated by space)
-void test_adxl345_tx()
+static void test_adxl345_tx()
 {
 	int i, n_bytes;
 	uint8_t tx_bytes[19], rx_bytes[19];
@@ -1060,7 +1060,7 @@ void test_adxl345_tx()
 //     "R" or "r" -> read operation
 // b : register address in hexadecimal
 // c : number of multi access in decimal (optional)
-void test_adxl345_reg()
+static void test_adxl345_reg()
 {
 	char s[20];
 	char addr, wdata[20];
@@ -1131,7 +1131,7 @@ void test_adxl345_reg()
 }
 
 
-void test_adxl345_mon()
+static void test_adxl345_mon()
 {
 	signed short data[3], data_last[3];
 	signed short xs, xe, ys, ye;
@@ -1184,7 +1184,7 @@ _SWORD curve_adxl345_z(_UWORD t)
 }
 
 
-void test_adxl345_log()
+static void test_adxl345_log()
 {
 	signed short *p_data;
 	int i;
@@ -1230,7 +1230,7 @@ void test_adxl345_log()
 }
 
 
-void test_adxl345_logf()
+static void test_adxl345_logf()
 {
 	FRESULT res;
 	signed short data[3];
@@ -1271,13 +1271,13 @@ void test_adxl345_logf()
 #ifdef DEBUG_LCD
 
 // LCD
-void test_lcd_init()
+static void test_lcd_init()
 {
 	lcdc_init();
 	printf("LCD initialization completed\r\n");
 }
 
-void test_lcd_cs()
+static void test_lcd_cs()
 {
 	char s[20];
 	static bool last;
@@ -1286,7 +1286,7 @@ void test_lcd_cs()
 	LCD_CS = ( last = test_gpio(last, s[0]) );
 }
 
-void test_lcd_rs()
+static void test_lcd_rs()
 {
 	char s[20];
 	static bool last;
@@ -1295,7 +1295,7 @@ void test_lcd_rs()
 	LCD_RS = ( last = test_gpio(last, s[0]) );
 }
 
-void test_lcd_nrst()
+static void test_lcd_nrst()
 {
 	char s[20];
 	static bool last;
@@ -1304,7 +1304,7 @@ void test_lcd_nrst()
 	LCD_NRST = ( last = test_gpio(last, s[0]) );
 }
 
-void test_lcd_tx()
+static void test_lcd_tx()
 {
 	int i, n_bytes;
 	uint8_t tx_bytes[19];
@@ -1326,7 +1326,7 @@ void test_lcd_tx()
 		sci12_LCD_transmit(tx_bytes[i]);
 }
 
-void test_lcd_clk()
+static void test_lcd_clk()
 {
 	sci12_LCD_com_mode(SCI12_GPIORX); // GPIO RX mode
 
@@ -1335,7 +1335,7 @@ void test_lcd_clk()
 	sci12_LCD_com_mode(SCI12_SPITX); // SPI TX mode
 }
 
-void test_lcd_rx()
+static void test_lcd_rx()
 {
 	sci12_LCD_com_mode(SCI12_GPIORX); // GPIO RX mode
 
@@ -1350,7 +1350,7 @@ void test_lcd_rx()
 // xe : horizontal end point
 // ys : vertical start point
 // ye : vertical end point
-void test_lcd_area()
+static void test_lcd_area()
 {
 	char s[20];
 	bool failed = false;
@@ -1388,7 +1388,7 @@ void test_lcd_area()
 // r : RED brightness (in hexadecimal)
 // g : GREEN brightness (in hexadecimal)
 // b : BLUE brightness (in hexadecimal)
-void test_lcd_fill()
+static void test_lcd_fill()
 {
 	_UWORD color, color_r, color_g, color_b;
 	char s[20];
@@ -1419,7 +1419,7 @@ void test_lcd_fill()
 // a : character to display
 // b : x position (hexadecimal)
 // c : y position (hexadecimal)
-void test_lcd_putc()
+static void test_lcd_putc()
 {
 	_UWORD x, y;
 	char c;
@@ -1448,7 +1448,7 @@ void test_lcd_putc()
 
 }
 
-void test_lcd_puts()
+static void test_lcd_puts()
 {
 	char s[100];
 	printf("string to display : \r\n");
@@ -1457,17 +1457,17 @@ void test_lcd_puts()
 	lcdc_puts(s, LCDC_WHITE, 0,0);
 }
 
-void test_lcd_rinv()
+static void test_lcd_rinv()
 {
 	lcdc_row_invert();
 }
 
-void test_lcd_cinv()
+static void test_lcd_cinv()
 {
 	lcdc_col_invert();
 }
 
-void test_lcd_ainv()
+static void test_lcd_ainv()
 {
 	lcdc_row_col_exchange();
 }
@@ -1478,7 +1478,7 @@ void test_lcd_ainv()
 // a : "W" or "w" -> write operation,
 //     "R" or "r" -> read operation
 // b : register address in hexadecimal
-void test_lcd_reg()
+static void test_lcd_reg()
 {
 	char s[20];
 	unsigned char addr;
@@ -1534,7 +1534,7 @@ void test_lcd_reg()
 // a : "W" or "w" -> write operation,
 //     "R" or "r" -> read operation
 // b : register address in hexadecimal
-void test_lcd_open()
+static void test_lcd_open()
 {
 	char s[20];
 	unsigned char addr;
@@ -1577,7 +1577,7 @@ void test_lcd_open()
 }
 
 
-void test_lcd_write()
+static void test_lcd_write()
 {
 	char s[20];
 	unsigned char data;
@@ -1600,7 +1600,7 @@ void test_lcd_write()
 
 }
 
-void test_lcd_read()
+static void test_lcd_read()
 {
 	char c;
 	int n_transfer;
@@ -1628,7 +1628,7 @@ void test_lcd_read()
 
 }
 
-void test_lcd_close()
+static void test_lcd_close()
 {
 	ST7735S_close();
 }
@@ -1641,7 +1641,7 @@ void test_lcd_close()
 
 //---- Miscellaneous tests ----//
 
-void test_misc()
+static void test_misc()
 {
 	unsigned long tm, tm_d;
 	float d1, d2, d3;
@@ -1728,7 +1728,7 @@ unsigned char test_gpio(bool last, char opt)
 
 #ifdef DEBUG_SD
 
-void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii)
+static void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii)
 {
 	int i, j;
 	uint8_t tmp;

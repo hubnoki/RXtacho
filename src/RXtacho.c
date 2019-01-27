@@ -74,13 +74,17 @@ extern "C" void __main()
 #define RX_BUF_N 100
 static char rx_buf[RX_BUF_N];
 
-char commandline_header[] = "RX UART > ";
+const char commandline_header[] = "RX UART > ";
 
 
 #define MODE_LOGGING	0
 #define MODE_FFT		1
 #define MODE_METER		2
 #define MODE_SETTING	3
+
+#define PSW_READY			0
+#define PSW_WAIT_RELEASE	1
+#define PSW_SHORT_PUSHED	2
 
 #define AXIS_X			0
 #define AXIS_Y			1
@@ -93,7 +97,7 @@ char commandline_header[] = "RX UART > ";
 #define SEL_A			0
 #define SEL_B			1
 
-#define DPUSH_TH_MS		200
+#define SHORT_PUSH_TH_MS		1000
 
 #define LOG_FMT_BIN		0
 #define LOG_FMT_CSV		1
@@ -109,18 +113,18 @@ typedef struct{
 } ST_VALUE_UNIT;
 
 
-static ST_VALUE_UNIT value_list_axis[] = {
+static const ST_VALUE_UNIT value_list_axis[] = {
 	{"X"	, AXIS_X}
 	, {"Y"	, AXIS_Y}
 	, {"Z"	, AXIS_Z}
 };
 
-static ST_VALUE_UNIT value_list_log_fmt[] = {
+static const ST_VALUE_UNIT value_list_log_fmt[] = {
 	{"BIN", LOG_FMT_BIN}
 	, {"CSV", LOG_FMT_CSV}
 };
 
-static ST_VALUE_UNIT value_list_rate[] = {
+static const ST_VALUE_UNIT value_list_rate[] = {
 	{"3200" 	, ADXL345_RATE_3200}
 	, {"1600" 	, ADXL345_RATE_1600}
 	, {"800" 	, ADXL345_RATE_800}
@@ -139,14 +143,14 @@ static ST_VALUE_UNIT value_list_rate[] = {
 	, {"0R10" 	, ADXL345_RATE_0R10}
 };
 
-static ST_VALUE_UNIT value_list_range[] = {
+static const ST_VALUE_UNIT value_list_range[] = {
 	{"2G"		, ADXL345_RANGE_2G}
 	, {"4G"		, ADXL345_RANGE_4G}
 	, {"8G"		, ADXL345_RANGE_8G}
 	, {"16G"	, ADXL345_RANGE_16G}
 };
 
-static ST_VALUE_UNIT value_list_fft_scale[] = {
+static const ST_VALUE_UNIT value_list_fft_scale[] = {
 	{"9", 9}
 	, {"8", 8}
 	, {"7", 7}
@@ -162,7 +166,7 @@ static ST_VALUE_UNIT value_list_fft_scale[] = {
 typedef struct{
 	char *name;
 	uint8_t nval;
-	ST_VALUE_UNIT *list;
+	const ST_VALUE_UNIT *list;
 } ST_SETTING_UNIT;
 
 static enum {
@@ -174,13 +178,13 @@ static enum {
 	STG_EXIT
 } STG_ENUM;
 
-static ST_SETTING_UNIT setting_list[] = {
+static const ST_SETTING_UNIT setting_list[] = {
 	{"axis"			, sizeof(value_list_axis) / sizeof(ST_VALUE_UNIT)		, value_list_axis}
 	, {"log_fmt"	, sizeof(value_list_log_fmt) / sizeof(ST_VALUE_UNIT)	, value_list_log_fmt}
 	, {"rate"		, sizeof(value_list_rate) / sizeof(ST_VALUE_UNIT)		, value_list_rate}
 	, {"range"		, sizeof(value_list_range) / sizeof(ST_VALUE_UNIT)		, value_list_range}
 	, {"fft_scale"	, sizeof(value_list_fft_scale) / sizeof(ST_VALUE_UNIT)	, value_list_fft_scale}
-	, {"exit"		, 1}
+	, {"exit"		, 1, NULL}
 };
 
 //---------------------
@@ -191,10 +195,8 @@ static struct{
 	ADXL345_CONF 	adxl345_cfg;
 	uint8_t 		axis_sel;
 
-	uint8_t 		psw_pushed;
+	uint8_t			psw_state;
 	unsigned long	psw_tm;
-	uint8_t			psw_dpush;
-	uint8_t			psw_ready;
 
 	FIX_T			g_buf_a[N_GBUF], g_buf_b[N_GBUF];
 	uint8_t 		g_buf_sel; // Buffer side to save G sensor data
@@ -266,13 +268,16 @@ void adxl345_int_routine()
 
 void psw_routine(void)
 {
-	if(vars.psw_ready){
-		if(!vars.psw_pushed){
-			vars.psw_pushed = 1;
+	if(vars.psw_state == PSW_READY){
+		if(PSW_PIN == 0){
 			timer_soft_reset(&(vars.psw_tm));
+			vars.psw_state = PSW_WAIT_RELEASE;
 		}
-		else if(timer_soft_count(&(vars.psw_tm)) < DPUSH_TH_MS){
-			vars.psw_dpush = 1;
+	}
+	else if(vars.psw_state == PSW_WAIT_RELEASE){
+		if(PSW_PIN == 1){
+			if(timer_soft_count(&(vars.psw_tm)) < SHORT_PUSH_TH_MS)
+				vars.psw_state = PSW_SHORT_PUSHED;
 		}
 	}
 }
@@ -371,11 +376,6 @@ static int get_file_sqno(char f_hdr[], int *sqno)
 }
 
 
-// sqrt(2^15) = sqrt(32768) ~= 181.02
-#define FFT_MAX_TMP (181 << FIX_P)
-#define FFT_MAX_INC ((181*181) << FIX_P)
-
-
 static _SWORD FFT_curve(_UWORD x, FIX_T *buf)
 {
 	int i1;
@@ -405,23 +405,7 @@ static _SWORD FFT_curve(_UWORD x, FIX_T *buf)
 	d3 += sqrt(d2); // sqrt(Re(1)^2 + Im(1)^2)
 
 	s1 = (d3 < (double)INT16_MAX) ? (_SWORD)d3 : INT16_MAX;
-	// return -(((_SWORD)d3) >> 9);
 	return -(s1 >> (vars.fft_disp_scale));
-
-
-
-	// FIX_T f1, f2;
-	// 
-	// f1 = buf[x*4];
-	// f2 = (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
-	// f1 = buf[x*4+1];
-	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
-	// f1 = buf[x*4+2];
-	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
-	// f1 = buf[x*4+3];
-	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
-
-	// return -(fix_fix2int(f2) >> 9);
 
 }
 
@@ -435,8 +419,6 @@ static _SWORD FFT_curve_b(_UWORD x)
 	return FFT_curve(x, vars.g_buf_b);
 }
 
-#undef FFT_MAX_TMP
-#undef FFT_MAX_INC
 
 static void FFT_log()
 {
@@ -493,7 +475,7 @@ int main(void)
 	int i;
 	char s[50];
 	unsigned long psw_cnt;
-	uint8_t psw_spush, psw_dpush;
+	uint8_t psw_spush, psw_lpush;
 	uint8_t *tmp_u8_p;
 	uint8_t u8_tmp;
 
@@ -505,8 +487,7 @@ int main(void)
 	vars.mode = MODE_LOGGING;
 	vars.mode_init = 1;
 	vars.axis_sel = AXIS_Z;
-	vars.psw_pushed = 0;
-	vars.psw_dpush = 0;
+	vars.psw_state = PSW_READY;
 	vars.g_buf_sel = SEL_A;
 	vars.g_buf_wp_a = 0;
 	vars.g_buf_wp_b = 0;
@@ -526,7 +507,7 @@ int main(void)
 
 	psw_cnt = 0;
 	psw_spush = 0;
-	psw_dpush = 0;
+	psw_lpush = 0;
 
 //---------------------------------------------------------
 	uart_set(rx_buf, RX_BUF_N);
@@ -556,7 +537,6 @@ int main(void)
 	psw_int_disable();
 	psw_int_set_callback(psw_routine);
 	psw_int_enable();
-	vars.psw_ready = 1;
 
 //---------------------------------------------------------
 	PRINTF("\r\n\r\n");
@@ -581,14 +561,13 @@ int main(void)
 
 		//// Check for PSW ////
 		psw_spush = 0;
+		psw_lpush = 0;
 		psw_cnt = timer_soft_count(&(vars.psw_tm));
-		if((vars.psw_dpush == 0) && (vars.psw_pushed == 1)){
-			if(psw_cnt >= DPUSH_TH_MS)
-				psw_spush = 1;
-		}
-		psw_dpush = vars.psw_dpush;
-		if((psw_spush == 1) || (psw_dpush == 1)){
-			vars.psw_ready = 0;
+		if(vars.psw_state == PSW_SHORT_PUSHED)
+			psw_spush = 1;
+		else if(vars.psw_state == PSW_WAIT_RELEASE){
+			if(timer_soft_count(&(vars.psw_tm)) >= SHORT_PUSH_TH_MS)
+				psw_lpush = 1;
 		}
 
 		//// Process for each mode ////
@@ -597,7 +576,7 @@ int main(void)
 			if(vars.mode_init){
 				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
 				lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
-				lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+				lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
 				vars.mode_init = 0;
 			}
 
@@ -619,19 +598,18 @@ int main(void)
 					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
 					if(res){
 						lcdc_puts("File open failed", LCDC_WHITE, 0, 0);
-						lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+						lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
 					}
 					else{
 						sprintf(s, "Logging ... (%d)", vars.log_sqno);
 						lcdc_puts(s, LCDC_WHITE, 0, 0);
-						lcdc_puts("Single push to stop", LCDC_WHITE, 0, 10);
+						lcdc_puts("Short Push to stop ", LCDC_WHITE, 0, 10);
 						vars.logging = 1;
 						adxl345_start();
 					}
 				}
-
-				// Mode change
-				if(psw_dpush & (vars.logging == 0)){
+				else if(psw_lpush){
+					// Mode change
 					vars.mode = MODE_FFT;
 					vars.mode_init = 1;
 				}
@@ -645,7 +623,7 @@ int main(void)
 					umount_SD();
 					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
 					lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
-					lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+					lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
 				}
 				// Continue logging
 				else{
@@ -687,7 +665,7 @@ int main(void)
 						vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
 					rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
 					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
-					lcdc_fill_area(0x8410, 0,119,120,120); // Zero leel line
+					lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
 					lcdc_draw_curve(FFT_curve_a, 120, LCDC_GREEN
 						, 0, 127, 9, 120);
 					vars.g_buf_wp_a = 0;
@@ -700,7 +678,7 @@ int main(void)
 						vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
 					rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
 					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
-					lcdc_fill_area(0x8410, 0,119,120,120); // Zero level line
+					lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
 					lcdc_draw_curve(FFT_curve_b, 120, LCDC_GREEN
 						, 0, 127, 9, 120);
 					vars.g_buf_wp_b = 0;
@@ -712,9 +690,8 @@ int main(void)
 				FFT_log();
 				lcdc_puts("FFT mode  ", LCDC_WHITE, 0, 0);
 			}
-
-			// Mode change
-			if(psw_dpush){
+			else if(psw_lpush){
+				// Mode change
 				vars.mode = MODE_METER;
 				vars.mode_init = 1;
 			}
@@ -729,7 +706,7 @@ int main(void)
 			}
 
 			// Mode change
-			if(psw_dpush){
+			if(psw_lpush){
 				vars.mode = MODE_SETTING;
 				vars.mode_init = 1;
 			}
@@ -738,7 +715,7 @@ int main(void)
 		//---------
 		else if(vars.mode == MODE_SETTING){
 
-			if(vars.mode_init || (psw_dpush && (vars.setting_state == STG_ST_VAL))){
+			if(vars.mode_init || (psw_lpush && (vars.setting_state == STG_ST_VAL))){
 				// Show mode name
 				if(vars.mode_init){
 					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, 8);
@@ -754,7 +731,7 @@ int main(void)
 				lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
 				vars.setting_state = STG_ST_STG;
 			}
-			else if(psw_dpush && (vars.setting_state == STG_ST_STG)){
+			else if(psw_lpush && (vars.setting_state == STG_ST_STG)){
 				// "exit" menu -> Apply setting values and go to next mode
 				if(strcmp(setting_list[vars.cur_setting_idx].name, "exit") == 0){
 					u8_tmp = (uint8_t)(setting_list[STG_AXIS].list[vars.cur_value_idx[STG_AXIS]].val);
@@ -805,15 +782,13 @@ int main(void)
 		}
 
 		//// Clear flags for PSW ////
-		if((psw_spush == 1) || (psw_dpush == 1)){
-			vars.psw_pushed = 0;
-			vars.psw_dpush = 0;
-		}
-		vars.psw_ready = 1;
+		if((psw_spush == 1) || (psw_lpush == 1))
+			vars.psw_state = PSW_READY;
 
 
     }
-  return 0;
+
+    return 0;
 }
 
 
