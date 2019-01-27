@@ -19,7 +19,7 @@
 //////// Defines ////////
 
 //---- for application to access ST7735S registers ----//
-#define ST7735S_REG_ACCESS
+//#define ST7735S_REG_ACCESS
 
 //---- ST7735S register addresses ----//
 #define ST7735S_NOP                 0x00

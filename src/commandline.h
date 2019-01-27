@@ -19,7 +19,7 @@
 #include <stdbool.h>
 
 #define COMMANDLINE_NARG_MAX 10
-#define COMMANDLINE_ARGLEN_MAX 100
+#define COMMANDLINE_ARGLEN_MAX 40
 
 typedef struct{
 	char *name; // command name

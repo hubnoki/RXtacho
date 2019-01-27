@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 
 
 #include "iodefine.h"
@@ -37,6 +38,12 @@
 
 #include "ff11/src/ff.h"
 
+#include "fix_math.h"
+#include "fft4g_fix.h"
+
+#include "work_area.h"
+
+#include "han_window.h"
 
 #ifdef CPPAPP
 //Initialize global constructors
@@ -58,80 +65,468 @@ extern "C" void __main()
 }
 #endif 
 
+
+#define PRINTF printf
+
+//-------------------------------------------------------------------------------------------
+// Local variables
+
 #define RX_BUF_N 100
 static char rx_buf[RX_BUF_N];
 
 char commandline_header[] = "RX UART > ";
 
-int adxl345_received_flag;
-signed short adxl345_received_data[3];
 
-// backspace is invalid in gets()
-// use gets_pol() to validate backspace
-char *gets_pol(char *s)
-{
-	while(!uart_kbhit_s())
-			;
-	return gets(s);
-}
+#define MODE_LOGGING	0
+#define MODE_FFT		1
+#define MODE_METER		2
+#define MODE_SETTING	3
 
-// wait for string input, fixed by Enter key
-// If 'q' is pressed, abort and returns false
-static bool gets_q(char *s, int n)
-{
-	char *p, *p_last;
-	bool rtn;
+#define AXIS_X			0
+#define AXIS_Y			1
+#define AXIS_Z			2
 
-	p = s;
-	p_last = s + n - 1;
+#define N_GBUF			512
+#define N_IP			32		// >= 2+sqrt(N_GBUF/2)
+#define N_W				640		// = N_GBUF * 5 / 4
 
-	while(p < p_last){
+#define SEL_A			0
+#define SEL_B			1
 
-		*p = uart_getc();
-		if(*p == 'q'){
-			rtn = false;
-			break;
-		}
-		else if( (*p == '\r') || (*p == '\n') ){
-			rtn = true;
-			*p = '\0'; // null termination
-			break;
-		}
+#define DPUSH_TH_MS		200
 
-		p++;
-	}
+#define LOG_FMT_BIN		0
+#define LOG_FMT_CSV		1
 
-	if(p == p_last)
-		*p = '\0';
+#define STG_ST_STG		0
+#define STG_ST_VAL		1
 
-	return rtn;
+//---------------------
 
-}
+typedef struct{
+	char *name;
+	unsigned int val;
+} ST_VALUE_UNIT;
 
+
+static ST_VALUE_UNIT value_list_axis[] = {
+	{"X"	, AXIS_X}
+	, {"Y"	, AXIS_Y}
+	, {"Z"	, AXIS_Z}
+};
+
+static ST_VALUE_UNIT value_list_log_fmt[] = {
+	{"BIN", LOG_FMT_BIN}
+	, {"CSV", LOG_FMT_CSV}
+};
+
+static ST_VALUE_UNIT value_list_rate[] = {
+	{"3200" 	, ADXL345_RATE_3200}
+	, {"1600" 	, ADXL345_RATE_1600}
+	, {"800" 	, ADXL345_RATE_800}
+	, {"400" 	, ADXL345_RATE_400}
+	, {"200" 	, ADXL345_RATE_200}
+	, {"100" 	, ADXL345_RATE_100}
+	, {"50" 	, ADXL345_RATE_50}
+	, {"25" 	, ADXL345_RATE_25}
+	, {"12R5" 	, ADXL345_RATE_12R5}
+	, {"6R5" 	, ADXL345_RATE_6R5}
+	, {"3R13" 	, ADXL345_RATE_3R13}
+	, {"1R56" 	, ADXL345_RATE_1R56}
+	, {"0R78" 	, ADXL345_RATE_0R78}
+	, {"0R39" 	, ADXL345_RATE_0R39}
+	, {"0R20" 	, ADXL345_RATE_0R20}
+	, {"0R10" 	, ADXL345_RATE_0R10}
+};
+
+static ST_VALUE_UNIT value_list_range[] = {
+	{"2G"		, ADXL345_RANGE_2G}
+	, {"4G"		, ADXL345_RANGE_4G}
+	, {"8G"		, ADXL345_RANGE_8G}
+	, {"16G"	, ADXL345_RANGE_16G}
+};
+
+static ST_VALUE_UNIT value_list_fft_scale[] = {
+	{"9", 9}
+	, {"8", 8}
+	, {"7", 7}
+	, {"6", 6}
+	, {"5", 5}
+	, {"4", 4}
+	, {"3", 3}
+	, {"2", 2}
+	, {"1", 1}
+};
+
+
+typedef struct{
+	char *name;
+	uint8_t nval;
+	ST_VALUE_UNIT *list;
+} ST_SETTING_UNIT;
+
+static enum {
+	STG_AXIS,
+	STG_LOGFMT,
+	STG_RATE,
+	STG_RANGE,
+	STG_FFTSCALE,
+	STG_EXIT
+} STG_ENUM;
+
+static ST_SETTING_UNIT setting_list[] = {
+	{"axis"			, sizeof(value_list_axis) / sizeof(ST_VALUE_UNIT)		, value_list_axis}
+	, {"log_fmt"	, sizeof(value_list_log_fmt) / sizeof(ST_VALUE_UNIT)	, value_list_log_fmt}
+	, {"rate"		, sizeof(value_list_rate) / sizeof(ST_VALUE_UNIT)		, value_list_rate}
+	, {"range"		, sizeof(value_list_range) / sizeof(ST_VALUE_UNIT)		, value_list_range}
+	, {"fft_scale"	, sizeof(value_list_fft_scale) / sizeof(ST_VALUE_UNIT)	, value_list_fft_scale}
+	, {"exit"		, 1}
+};
+
+//---------------------
+
+static struct{
+	uint8_t 		mode;
+	uint8_t			mode_init;
+	ADXL345_CONF 	adxl345_cfg;
+	uint8_t 		axis_sel;
+
+	uint8_t 		psw_pushed;
+	unsigned long	psw_tm;
+	uint8_t			psw_dpush;
+	uint8_t			psw_ready;
+
+	FIX_T			g_buf_a[N_GBUF], g_buf_b[N_GBUF];
+	uint8_t 		g_buf_sel; // Buffer side to save G sensor data
+	uint16_t 		g_buf_wp_a;
+	uint16_t 		g_buf_wp_b;
+	uint16_t 		g_buf_rp;
+	uint8_t 		g_overrun;
+
+	uint8_t 		logging;
+	int				log_sqno; // Sequential number for log file
+	int				log_format;
+
+	int 			fft_disp_scale;
+
+	int				setting_state;
+	int				cur_setting_idx;
+	uint8_t			cur_value_idx[sizeof(setting_list)/sizeof(ST_SETTING_UNIT)];
+
+	int 			fft_ip[N_IP];
+	FIX_T			fft_w[N_W];
+
+}vars;
+
+
+
+//-------------------------------------------------------------------------------------------
+// Interrupt routines
 
 void adxl345_int_routine()
 {
-	adxl345_received_flag = 1;
-	ADXL345_get(adxl345_received_data);
+	signed short d[3];
+	FIX_T f;
+
+	// Overrun flag for logging mode
+	if(vars.mode == MODE_LOGGING)
+		vars.g_overrun = (vars.g_buf_wp_a == vars.g_buf_rp);
+
+	ADXL345_get(d);
+	if(vars.axis_sel == AXIS_X)
+		f = fix_int2fix((int)d[0]);
+	else if(vars.axis_sel == AXIS_Y)
+		f = fix_int2fix((int)d[1]);
+	else if(vars.axis_sel == AXIS_Z)
+		f = fix_int2fix((int)d[2]);
+	else
+		f = 0;
+
+	// Put data into buffer
+	if(vars.logging){
+		vars.g_buf_a[vars.g_buf_wp_a] = f;
+		if(++vars.g_buf_wp_a >= N_GBUF)
+			vars.g_buf_wp_a = 0;
+	}
+	else{
+		if(vars.g_buf_sel == SEL_A){
+			if(vars.g_buf_wp_a < N_GBUF){
+				vars.g_buf_a[vars.g_buf_wp_a] = f;
+				vars.g_buf_wp_a++;
+			}
+		}
+		else{
+			if(vars.g_buf_wp_b < N_GBUF){
+				vars.g_buf_b[vars.g_buf_wp_b] = f;
+				vars.g_buf_wp_b++;
+			}
+		}
+	}
 }
 
 void psw_routine(void)
 {
-	static bool led_state = 0;
-	LCD_LED = (led_state ^= 1);
+	if(vars.psw_ready){
+		if(!vars.psw_pushed){
+			vars.psw_pushed = 1;
+			timer_soft_reset(&(vars.psw_tm));
+		}
+		else if(timer_soft_count(&(vars.psw_tm)) < DPUSH_TH_MS){
+			vars.psw_dpush = 1;
+		}
+	}
 }
 
+//-------------------------------------------------------------------------------------------
+
+static void adxl345_start()
+{
+	signed short d[3];
+
+	ADXL345_get(d); // clear data buffer
+	adxl345int1_int_enable();
+	ADXL345_int_enable(ADXL345_INT_BIT_DATA_READY);
+	ADXL345_start();
+}
+
+static void adxl345_stop()
+{
+	signed short d[3];
+
+	adxl345int1_int_disable();
+	ADXL345_int_enable(0x0); // disable all interrupts
+	ADXL345_stop();
+	ADXL345_get(d); // clear data buffer
+}
+
+static inline FRESULT mount_SD(FATFS * fs)
+{
+	return f_mount(fs
+			, "SD1" // physical drive number :
+			, 1 // option : 1 -> do mount action
+			);
+}
+
+static inline FRESULT umount_SD()
+{
+	return f_mount(0, "SD1", 1);
+}
+
+/**
+ * @brief 	Get the sequntial number for the next file
+ * 			Sequential number is expected to exist before ".[extention]" in the file name
+ * 
+ * @param f_hdr		File name header, and '*' should be added last
+ * 					e.g.	"adxl345_log_000.csv", "adxl345_log_001.csv", ... -> "adxl345_log_*"
+ * @param sqno 		Sequential number for next file		
+ * @return int		Result (0 -> Success, 1 -> Error)
+ */
+static int get_file_sqno(char f_hdr[], int *sqno)
+{
+	int i;
+	FRESULT res;
+	char *sqno_top;
+	int sqno_len;
+	char s_sqno[11];
+	int sqno_tmp;
+
+	wk.fno.lfname = wk.fname;
+	wk.fno.lfsize = WK_N_FNAME;
+
+	res = mount_SD(&(wk.fatfs));
+	if(res != FR_OK){
+		PRINTF("SD open failed\r\n");
+		return 1;
+	}
+
+	*sqno = 0;
+	res = f_findfirst(&(wk.dj), &(wk.fno), "", f_hdr);
+	while ((res == FR_OK) && wk.fno.fname[0]) {
+		// printf("%s\r\n", wk.fno.lfname);
+
+		// strlen(f_hdr) = actual length + 1 (+1 for '*' character)
+		if(strlen(f_hdr) > strlen(wk.fno.lfname)) // File name with only f_hdr
+			continue;
+		sqno_top = &(wk.fno.lfname[strlen(f_hdr)-1]);
+		sqno_len = strcspn(wk.fno.lfname, ".") - (strlen(f_hdr) - 1);
+		// printf("sqno_len : %d\r\n", sqno_len);
+
+		strncpy(s_sqno, sqno_top, sqno_len);
+		s_sqno[sqno_len] = '\0';
+		for(i = 0; i < sqno_len; i++){
+			if(!isdigit(s_sqno[i])) break; // Not valid as a number
+		}
+
+		sqno_tmp = atoi(s_sqno);
+		// printf("sqno_tmp : %d\r\n", sqno_tmp);
+		if(sqno_tmp >= *sqno)
+			*sqno = sqno_tmp + 1;
+
+		res = f_findnext(&(wk.dj), &(wk.fno));
+	}
+
+	umount_SD();	
+
+	return 0;
+}
+
+
+// sqrt(2^15) = sqrt(32768) ~= 181.02
+#define FFT_MAX_TMP (181 << FIX_P)
+#define FFT_MAX_INC ((181*181) << FIX_P)
+
+
+static _SWORD FFT_curve(_UWORD x, FIX_T *buf)
+{
+	int i1;
+	double d1, d2, d3;
+	_SWORD s1;
+
+	d3 = 0.0;
+
+	i1 = fix_fix2int(buf[x*4]); // Re(0)
+	d1 = i1;
+	d1 *= i1; // Re(0)^2
+	d2 = d1;
+	i1 = fix_fix2int(buf[x*4+1]); // Im(0)
+	d1 = i1;
+	d1 *= i1; // Im(0)^2
+	d2 += d1;
+	d3 += sqrt(d2); // sqrt(Re(0)^2 + Im(0)^2)
+
+	i1 = fix_fix2int(buf[x*4+2]); // Re(1)
+	d1 = i1;
+	d1 *= i1; // Re(1)^2
+	d2 = d1;
+	i1 = fix_fix2int(buf[x*4+1]); // Im(1)
+	d1 = i1;
+	d1 *= i1; // Im(1)^2
+	d2 += d1;
+	d3 += sqrt(d2); // sqrt(Re(1)^2 + Im(1)^2)
+
+	s1 = (d3 < (double)INT16_MAX) ? (_SWORD)d3 : INT16_MAX;
+	// return -(((_SWORD)d3) >> 9);
+	return -(s1 >> (vars.fft_disp_scale));
+
+
+
+	// FIX_T f1, f2;
+	// 
+	// f1 = buf[x*4];
+	// f2 = (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
+	// f1 = buf[x*4+1];
+	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
+	// f1 = buf[x*4+2];
+	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
+	// f1 = buf[x*4+3];
+	// f2 += (fix_abs(f1) <= FFT_MAX_TMP) ? (fix_mul(f1, f1) >> 2) : (FFT_MAX_INC >> 2);
+
+	// return -(fix_fix2int(f2) >> 9);
+
+}
+
+static _SWORD FFT_curve_a(_UWORD x)
+{
+	return FFT_curve(x, vars.g_buf_a);
+}
+
+static _SWORD FFT_curve_b(_UWORD x)
+{
+	return FFT_curve(x, vars.g_buf_b);
+}
+
+#undef FFT_MAX_TMP
+#undef FFT_MAX_INC
+
+static void FFT_log()
+{
+	FRESULT res;
+	int sqno, i;
+
+	if(get_file_sqno("adxl345_FFT_*", &sqno)){
+		return;
+	}
+
+	res = mount_SD(&(wk.fatfs));
+	if(res != FR_OK){
+		PRINTF("SD open failed\r\n");
+		return;
+	}
+
+	sprintf(wk.fname, "adxl345_FFT_%03d.csv", sqno);
+//	PRINTF("File name : %s\r\n", wk.fname);
+	res = f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW);
+	if(res){
+		PRINTF("File open failed, res=%d\r\n", res);
+	}
+	else{
+		for(i = 0; i < N_GBUF/2; i++){
+			if(vars.g_buf_sel == SEL_A){
+				f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_b[i*2], vars.g_buf_b[i*2+1]);
+			}
+			else{
+				f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_a[i*2], vars.g_buf_a[i*2+1]);
+			}
+		}
+		f_printf(&(wk.fl), "\r\n");
+		for(i = 0; i < 128; i++){
+			if(vars.g_buf_sel == SEL_A){
+				f_printf(&(wk.fl), "%d\r\n", FFT_curve_b((unsigned short)i));
+			}
+			else{
+				f_printf(&(wk.fl), "%d\r\n", FFT_curve_a((unsigned short)i));
+			}
+		}
+		f_close(&(wk.fl));
+	}
+
+	f_mount(0, "SD1", 1); //unmount
+	
+
+}
+
+
+//-------------------------------------------------------------------------------------------
 
 int main(void)
 {
 	int i;
 	char s[50];
+	unsigned long psw_cnt;
+	uint8_t psw_spush, psw_dpush;
+	uint8_t *tmp_u8_p;
+	uint8_t u8_tmp;
 
-	bool int_pin;
-	unsigned long tm;
-	ADXL345_CONF adxl345_cfg;
+	FRESULT res;
+	UINT btw;
+	UINT tmp;
 
-    // TODO: add application code here
+//---------------------------------------------------------
+	vars.mode = MODE_LOGGING;
+	vars.mode_init = 1;
+	vars.axis_sel = AXIS_Z;
+	vars.psw_pushed = 0;
+	vars.psw_dpush = 0;
+	vars.g_buf_sel = SEL_A;
+	vars.g_buf_wp_a = 0;
+	vars.g_buf_wp_b = 0;
+	vars.g_buf_rp = 0;
+	vars.g_overrun = 0;
+	vars.logging = 0;
+	vars.log_format = LOG_FMT_BIN;
+	vars.fft_disp_scale = 9;
+
+	vars.setting_state = STG_ST_STG;
+	vars.cur_setting_idx = 0;
+	for(i = 0; i < sizeof(setting_list)/sizeof(ST_SETTING_UNIT); i++){
+		vars.cur_value_idx[i] = 0;
+	}
+
+	vars.fft_ip[0] = 0;
+
+	psw_cnt = 0;
+	psw_spush = 0;
+	psw_dpush = 0;
 
 //---------------------------------------------------------
 	uart_set(rx_buf, RX_BUF_N);
@@ -142,70 +537,279 @@ int main(void)
 	LCD_NPWR = 0;
 	lcdc_init();
 	LCD_LED = 1;
+	lcdc_fill(LCDC_BLACK);
 
 //---------------------------------------------------------
-	adxl345int1_int_disable();
+	adxl345_stop();
 	adxl345int1_int_set_callback(adxl345_int_routine);
 
-	ADXL345_get_default_config(&adxl345_cfg);
-	adxl345_cfg.int_map = 0;// &= (~ADXL345_INT_BIT_DATA_READY);
-	adxl345_cfg.int_invert = 1;
-//	adxl345_cfg.rate = ADXL345_RATE_0R78;
-	ADXL345_config(&adxl345_cfg);
-	ADXL345_int_enable(0x0); // disable all interrupts
-	ADXL345_stop();
-	ADXL345_get(adxl345_received_data); // clear data buffer
+	ADXL345_get_default_config(&(vars.adxl345_cfg));
+	vars.adxl345_cfg.int_map = 0;
+	vars.adxl345_cfg.int_invert = 1;
+	// vars.adxl345_cfg.rate = ADXL345_RATE_3200;
+	vars.adxl345_cfg.rate = ADXL345_RATE_400;
+	vars.adxl345_cfg.range = ADXL345_RANGE_8G;
+	ADXL345_config(&(vars.adxl345_cfg));
+
 
 //---------------------------------------------------------
 	psw_int_disable();
 	psw_int_set_callback(psw_routine);
 	psw_int_enable();
+	vars.psw_ready = 1;
 
 //---------------------------------------------------------
-//---------------------------------------------------------
-	printf("\r\n\r\n");
-	printf("**** program start ****\r\n");
-	printf("Built on e2studio version 6.2.0\r\n");
-	printf(commandline_header);
+	PRINTF("\r\n\r\n");
+	PRINTF("**** program start ****\r\n");
+	PRINTF("Built on e2studio version 6.2.0\r\n");
 
-	timer_soft_reset(&tm);
-
+	//---------------------------------------------------------
+	PRINTF(commandline_header);
+	
     while (1) {
 
+		//// Serial commands ////
 		if(uart_kbhit_s()){
     		uart_gets(s);
 
     		if(!commandline_input(s))
-    			printf("illegal command\r\n");
+    			PRINTF("illegal command\r\n");
 
     		uart_puts("\r\n");
-    		printf(commandline_header);
+    		PRINTF(commandline_header);
     	}
 
-#if 0
-		if(adxl345_received_flag){
-			disable_IRQ0();
-			printf("%d,%d,%d\r\n", adxl345_received_data[0]
-								 , adxl345_received_data[1]
-								 , adxl345_received_data[2]);
-			adxl345_received_flag = 0;
-			enable_IRQ0();
+		//// Check for PSW ////
+		psw_spush = 0;
+		psw_cnt = timer_soft_count(&(vars.psw_tm));
+		if((vars.psw_dpush == 0) && (vars.psw_pushed == 1)){
+			if(psw_cnt >= DPUSH_TH_MS)
+				psw_spush = 1;
 		}
-#elif 0
-		if(ADXL345_ready()){
-			int_pin = ADXL345_INT1_PIN;
-			ADXL345_get(adxl345_received_data);
-			printf("%d;%d,%d,%d;%d\r\n", int_pin, adxl345_received_data[0]
-								 , adxl345_received_data[1]
-								 , adxl345_received_data[2]
-							 	 , ADXL345_INT1_PIN);
+		psw_dpush = vars.psw_dpush;
+		if((psw_spush == 1) || (psw_dpush == 1)){
+			vars.psw_ready = 0;
+		}
+
+		//// Process for each mode ////
+		//---------
+		if(vars.mode == MODE_LOGGING){
+			if(vars.mode_init){
+				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+				lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
+				lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+				vars.mode_init = 0;
+			}
+
+			if(!(vars.logging)){
+				// Start logging
+				if(psw_spush){
+					res = 0;
+
+					if(get_file_sqno("adxl345_log_*", &(vars.log_sqno)))
+						res = 1;
+					res |= mount_SD(&(wk.fatfs));
+
+					if(vars.log_format == LOG_FMT_CSV)
+						sprintf(wk.fname, "adxl345_log_%03d.csv", vars.log_sqno);
+					else
+						sprintf(wk.fname, "adxl345_log_%03d.bin", vars.log_sqno);
+					res |= f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW);
+
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+					if(res){
+						lcdc_puts("File open failed", LCDC_WHITE, 0, 0);
+						lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+					}
+					else{
+						sprintf(s, "Logging ... (%d)", vars.log_sqno);
+						lcdc_puts(s, LCDC_WHITE, 0, 0);
+						lcdc_puts("Single push to stop", LCDC_WHITE, 0, 10);
+						vars.logging = 1;
+						adxl345_start();
+					}
+				}
+
+				// Mode change
+				if(psw_dpush & (vars.logging == 0)){
+					vars.mode = MODE_FFT;
+					vars.mode_init = 1;
+				}
+			}
+			else{
+				// Stop logging
+				if(psw_spush){
+					adxl345_stop();
+					vars.logging = 0;
+					f_close(&(wk.fl));
+					umount_SD();
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+					lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
+					lcdc_puts("Single push to start", LCDC_WHITE, 0, 10);
+				}
+				// Continue logging
+				else{
+					if(vars.g_buf_wp_a != vars.g_buf_rp){
+						if(vars.log_format == LOG_FMT_CSV){
+							f_printf(&(wk.fl), "%d,%d\r\n"
+								, fix_fix2int(vars.g_buf_a[vars.g_buf_rp]), vars.g_overrun);
+						}
+						else if(vars.log_format == LOG_FMT_BIN){
+							f_write(&(wk.fl), &(vars.g_buf_a[vars.g_buf_rp]), 4, &btw);
+							tmp = vars.g_overrun;
+							f_write(&(wk.fl), &tmp, 4, &btw);
+						}
+						if(++vars.g_buf_rp >= N_GBUF)
+							vars.g_buf_rp = 0;
+						vars.g_overrun = 0;
+					}
+				}
+			}
 
 		}
-#endif
-    	if(timer_soft_count(&tm) >= 1000){
-    		timer_soft_reset(&tm);
-    	}
+		//---------
+		else if(vars.mode == MODE_FFT){
+			if(vars.mode_init){
+				adxl345_stop();
+				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+				lcdc_puts("FFT mode", LCDC_WHITE, 0, 0);
+				vars.g_buf_sel = SEL_A;
+				vars.g_buf_wp_a = 0;
+				vars.g_buf_wp_b = 0;
+				adxl345_start();
+				vars.mode_init = 0;
+			}
 
+			if(vars.g_buf_sel == SEL_A){
+				if(vars.g_buf_wp_a == N_GBUF){
+					vars.g_buf_sel = SEL_B;
+					for(i = 0; i < 512; i++)
+						vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
+					rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
+					lcdc_fill_area(0x8410, 0,119,120,120); // Zero leel line
+					lcdc_draw_curve(FFT_curve_a, 120, LCDC_GREEN
+						, 0, 127, 9, 120);
+					vars.g_buf_wp_a = 0;
+				}
+			}
+			else{
+				if(vars.g_buf_wp_b == N_GBUF){
+					vars.g_buf_sel = SEL_A;
+					for(i = 0; i < 512; i++)
+						vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
+					rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
+					lcdc_fill_area(0x8410, 0,119,120,120); // Zero level line
+					lcdc_draw_curve(FFT_curve_b, 120, LCDC_GREEN
+						, 0, 127, 9, 120);
+					vars.g_buf_wp_b = 0;
+				}
+			}
+
+			if(psw_spush){
+				lcdc_puts("Saving ...", LCDC_WHITE, 0, 0);
+				FFT_log();
+				lcdc_puts("FFT mode  ", LCDC_WHITE, 0, 0);
+			}
+
+			// Mode change
+			if(psw_dpush){
+				vars.mode = MODE_METER;
+				vars.mode_init = 1;
+			}
+
+		}
+		//---------
+		else if(vars.mode == MODE_METER){
+			if(vars.mode_init){
+				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+				lcdc_puts("METER mode", LCDC_WHITE, 0, 0);
+				vars.mode_init = 0;
+			}
+
+			// Mode change
+			if(psw_dpush){
+				vars.mode = MODE_SETTING;
+				vars.mode_init = 1;
+			}
+
+		}
+		//---------
+		else if(vars.mode == MODE_SETTING){
+
+			if(vars.mode_init || (psw_dpush && (vars.setting_state == STG_ST_VAL))){
+				// Show mode name
+				if(vars.mode_init){
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, 8);
+					lcdc_puts("SETTING mode", LCDC_WHITE, 0, 0);
+					vars.mode_init = 0;
+				}
+				// Show setting list
+				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
+				for(i = 0; i < (sizeof(setting_list)/sizeof(ST_SETTING_UNIT)); i++){
+					lcdc_puts(setting_list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
+				}
+				// Selection mark
+				lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+				vars.setting_state = STG_ST_STG;
+			}
+			else if(psw_dpush && (vars.setting_state == STG_ST_STG)){
+				// "exit" menu -> Apply setting values and go to next mode
+				if(strcmp(setting_list[vars.cur_setting_idx].name, "exit") == 0){
+					u8_tmp = (uint8_t)(setting_list[STG_AXIS].list[vars.cur_value_idx[STG_AXIS]].val);
+					vars.axis_sel = u8_tmp;
+					vars.log_format = setting_list[STG_LOGFMT].list[vars.cur_value_idx[STG_LOGFMT]].val;
+					u8_tmp = (uint8_t)(setting_list[STG_RATE].list[vars.cur_value_idx[STG_RATE]].val);
+					ADXL345_set_rate(u8_tmp);
+					u8_tmp = (uint8_t)(setting_list[STG_RANGE].list[vars.cur_value_idx[STG_RANGE]].val);
+					ADXL345_set_range(u8_tmp);
+					tmp = setting_list[STG_FFTSCALE].list[vars.cur_value_idx[STG_FFTSCALE]].val;
+					vars.fft_disp_scale = tmp;
+
+					vars.cur_setting_idx = STG_AXIS;
+					vars.mode = MODE_LOGGING;
+					vars.mode_init = 1;
+				}
+				// Other menu -> Show value list
+				else{
+					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
+					for(i = 0; i < setting_list[vars.cur_setting_idx].nval; i++){
+						lcdc_puts(setting_list[vars.cur_setting_idx].list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
+					}
+					// Selection mark
+					lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_value_idx[vars.cur_setting_idx]+1)*9);
+					vars.setting_state = STG_ST_VAL;
+				}
+
+			}
+
+			if(psw_spush){
+				if(vars.setting_state == STG_ST_STG){
+					// Increment setting index
+					lcdc_putchar(' ', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+					if(++(vars.cur_setting_idx) >= sizeof(setting_list) / sizeof(ST_SETTING_UNIT))
+						vars.cur_setting_idx = 0;
+					lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+				}
+				else{
+					// Increment value index
+					tmp_u8_p = &(vars.cur_value_idx[vars.cur_setting_idx]);
+					lcdc_putchar(' ', LCDC_WHITE, 0, (*tmp_u8_p+1)*9);
+					if(++(*tmp_u8_p) >= setting_list[vars.cur_setting_idx].nval)
+						*tmp_u8_p = 0;
+					lcdc_putchar('*', LCDC_WHITE, 0, (*tmp_u8_p+1)*9);
+				}
+			}
+
+		}
+
+		//// Clear flags for PSW ////
+		if((psw_spush == 1) || (psw_dpush == 1)){
+			vars.psw_pushed = 0;
+			vars.psw_dpush = 0;
+		}
+		vars.psw_ready = 1;
 
 
     }
@@ -213,1535 +817,3 @@ int main(void)
 }
 
 
-
-//////// SD card test routines ////////
-
-void test_command_list();
-
-void test_cs();
-void test_tx();
-void test_txmulti();
-
-void test_init();
-void test_sread();
-void test_swrite();
-void test_mread();
-void test_mwrite();
-void test_blocksize();
-void test_sectorcount();
-
-//// FatFs functions
-void test_f_mount();
-void test_f_open(); // create new file
-void test_f_write();
-void test_f_stat();
-
-//// UNIX like commands ////
-void test_pwd();
-void test_cd();
-void test_ls();
-void test_cat();
-void test_mkdir();
-
-
-//// ADXL345
-void test_adxl345_cs();
-void test_adxl345_tx();
-void test_adxl345_init();
-void test_adxl345_reg();
-void test_adxl345_mon();
-void test_adxl345_log();
-
-void test_adxl345_logf();
-void test_adxl345_int();
-
-// LCD
-void test_lcd_init();
-void test_lcd_cs();
-void test_lcd_rs();
-void test_lcd_tx();
-void test_lcd_fill();
-
-void test_lcd_clk();
-void test_lcd_rx();
-
-void test_lcd_area();
-void test_lcd_putc();
-void test_lcd_puts();
-
-void test_lcd_rinv();
-void test_lcd_cinv();
-void test_lcd_ainv();
-
-#ifdef ST7735S_REG_ACCESS
-
-void test_lcd_reg();
-void test_lcd_open();
-void test_lcd_write();
-void test_lcd_read();
-void test_lcd_close();
-
-#endif // ST7735S_REG_ACCESS
-
-
-void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii);
-
-COMMANDLINE_SET commandline_sets[] = {
-		{"command", 	test_command_list}
-		, {"cs", 		test_cs}
-		, {"tx", 		test_tx}
-		, {"txmulti", 	test_txmulti}
-		, {"init", 		test_init}
-		, {"sread", 	test_sread}
-		, {"swrite", 	test_swrite}
-		, {"mread", 	test_mread}
-		, {"mwrite",	test_mwrite}
-		, {"blocksize", test_blocksize}
-		, {"sectorcount", test_sectorcount}
-		, {"f_mount", 	test_f_mount}
-		, {"f_open", 	test_f_open}
-		, {"f_write", 	test_f_write}
-		, {"f_stat", 	test_f_stat}
-		, {"pwd", 		test_pwd}
-		, {"cd", 		test_cd}
-		, {"ls", 		test_ls}
-		, {"cat", 		test_cat}
-		, {"mkdir", 	test_mkdir}
-		, {"adxl345_cs", test_adxl345_cs}
-		, {"adxl345_tx", test_adxl345_tx}
-		, {"adxl345_init", test_adxl345_init}
-		, {"adxl345_reg", test_adxl345_reg}
-		, {"adxl345_mon", test_adxl345_mon}
-		, {"adxl345_log", test_adxl345_log}
-		, {"adxl345_logf", test_adxl345_logf}
-		, {"adxl345_int", test_adxl345_int}
-		, {"lcd_init", 	test_lcd_init}
-		, {"lcd_cs", 	test_lcd_cs}
-		, {"lcd_rs", 	test_lcd_rs}
-		, {"lcd_tx", 	test_lcd_tx}
-		, {"lcd_clk", 	test_lcd_clk}
-		, {"lcd_rx", 	test_lcd_rx}
-		, {"lcd_area",	test_lcd_area}
-		, {"lcd_fill", 	test_lcd_fill}
-		, {"lcd_putc",	test_lcd_putc}
-		, {"lcd_puts",	test_lcd_puts}
-		, {"lcd_rinv",	test_lcd_rinv}
-		, {"lcd_cinv",	test_lcd_cinv}
-		, {"lcd_ainv",	test_lcd_ainv}
-
-#ifdef ST7735S_REG_ACCESS
-		, {"lcd_reg", 	test_lcd_reg}
-		, {"lcd_open",	test_lcd_open}
-		, {"lcd_write",	test_lcd_write}
-		, {"lcd_read",	test_lcd_read}
-		, {"lcd_close",	test_lcd_close}
-#endif // ST7735S_REG_ACCESS
-
-};
-
-const int n_commandline = (sizeof(commandline_sets) / sizeof(COMMANDLINE_SET));
-
-#define N_TEST_BUF 3072
-uint8_t test_buf[N_TEST_BUF];
-
-#define N_BLOCK_SD (N_TEST_BUF / 512)
-#define ADXL345_LOG_DEPTH (N_TEST_BUF / 6)
-
-FATFS fatfs;
-DIR ff_dir;
-FIL ff_file;
-FILINFO ff_info;
-TCHAR ff_fname[256], ff_cwd[256];
-
-
-// command format : command
-// (no argument)
-// list all commands
-void test_command_list()
-{
-	int i;
-
-	printf("%s", commandline_sets[0].name);
-	for(i = 1; i < n_commandline; i++)
-		printf(", %s", commandline_sets[i].name);
-
-	printf("\r\n");
-}
-
-
-unsigned char test_gpio(bool last, char opt);
-
-
-// command format : cs [a]
-// a : 0, l, or L -> set sd_cs pin LOW
-//     1, h, or H -> set sd_cs pin HIGH
-//     other or not specified -> alternate sd_cs pin state
-void test_cs()
-{
-	char s[20];
-	static bool last;
-
-	commandline_get_arg(1, s, 20);
-	SD_CS = ( last = test_gpio(last, s[0]) );
-}
-
-// command format : tx [a]
-// a : data to send to SD card in hexadecimal (00 ~ ff)
-//     up to 19 data are accepted (separated by space)
-void test_tx()
-{
-	int i, n_bytes;
-	uint8_t tx_bytes[19], rx_bytes[19];
-	char s[20];
-
-	n_bytes = commandline_narg() - 1;
-
-	for(i = 0; i < n_bytes; i++){
-		commandline_get_arg(i+1, s, 20);
-		tx_bytes[i] = (uint8_t)strtoul(s, NULL, 16);
-	}
-
-
-	printf("input : ");
-	for(i = 0; i < n_bytes; i++)
-		printf("%#02x ", tx_bytes[i]);
-	printf("\r\n");
-
-	for(i = 0; i < n_bytes; i++)
-		rx_bytes[i] = sci5_sd_transceive(tx_bytes[i]);
-
-	printf("response : ");
-	for(i = 0; i < n_bytes; i++)
-		printf("%#02x ", rx_bytes[i]);
-	printf("\r\n");
-
-}
-
-// command format : txmulti [a] [b]
-// a : data to send to SD card in hexadecimal (00 ~ ff)
-// b : count to send data (send data [a] for [b] times)
-void test_txmulti()
-{
-	uint8_t data, rx_buf;
-	int count, i;
-	char s[20];
-
-	if(!commandline_get_arg(1, s, 20)){
-		printf("argument error\r\n");
-		return;
-	}
-	data = (uint8_t)strtoul(s, NULL, 16);
-
-	if(!commandline_get_arg(2, s, 20)){
-		printf("argument error\r\n");
-		return;
-	}
-	count = (int)strtoul(s, NULL, 10);
-
-	printf("data : %02x, count %d\r\n", data, count);
-
-	printf("received data : \r\n");
-	for(i = 0; i < count; i++){
-		rx_buf = sci5_sd_transceive(data);
-		printf("%02x ", rx_buf);
-		if( (i % 16) == 15 ) printf("\r\n");
-	}
-	printf("\r\n");
-
-}
-
-// command format : init
-// (no argument)
-// initialize SD card
-void test_init()
-{
-	SDC_INIT_RESULT res;
-
-	res = sdc_init();
-	if(res.result == 0)
-		printf("initialize succeeded\r\n");
-	else
-		printf("initialize failed, result : %#02x\r\n", res.result);
-}
-
-// command format : sread  [a] [b]
-// a : read address by sector in hexadecimal
-// b : "ascii" -> print the data to be translated by ascii code
-//     else or not specified : print the data by hexadecimal (00 ~ ff)
-void test_sread()
-{
-	unsigned long addr;
-	SDC_RW_RESULT result;
-	char s[20];
-
-	bool ascii = false;
-
-
-	if(commandline_get_arg(1, s, 20))
-		addr = strtoul(s, NULL, 16);
-	else{
-		printf("no address\r\n");
-		return;
-	}
-
-	if(commandline_get_arg(2, s, 20)){
-		if(strcmp(s, "ascii") == 0)
-			ascii = true;
-	}
-
-	result = sdc_SingleBlockRead(test_buf, addr);
-
-	printf("result : %#02x %#02x %#02x %#02x\r\n",
-			result.cmd_resp,
-			result.err_token,
-			result.cmd12_resp,
-			result.prv);
-
-	if(result.result)
-		printf("single read failed\r\n");
-	else{
-		printf("data : \r\n");
-		print_bytes_matrix(test_buf, 512, 16, ascii);
-	}
-}
-
-// command format : swrite [a] [b]
-// a : write address by sector in hexadecimal
-// b : "ascii" -> write data are specified by ascii characters
-//     else or not specified -> write data are specified by array of hexadecimal data
-void test_swrite()
-{
-	unsigned long addr;
-	SDC_RW_RESULT res;
-
-	bool ascii = false;
-
-	char s[100];
-
-	int p_block;
-	char *token;
-
-
-	if(commandline_get_arg(1, s, 20))
-		addr = strtoul(s, NULL, 16);
-	else{
-		printf("no address\r\n");
-		return;
-	}
-
-	if(commandline_get_arg(2, s, 20)){
-		if(strcmp(s, "ascii") == 0)
-			ascii = true;
-	}
-
-
-	res = sdc_SingleBlockRead(test_buf, addr);
-	if(res.result != 0)
-		printf("data preload failed\r\n");
-	else
-		printf("data preloaded\r\n");
-
-	printf("start byte : ");
-	gets_pol(s);
-
-	p_block = (uint8_t)strtoul(s, NULL, 16);
-
-	printf("data to write : ");
-	gets_pol(s);
-
-
-	//// put data to write into the buffer ////
-	if(ascii)
-		strncpy((char *)test_buf, s, 512);
-	else{
-		token = strtok(s, " ");
-		while(token != NULL){
-			if(p_block >= 512)
-				break;
-			else{
-				test_buf[p_block] = strtoul(token, NULL, 16);
-				p_block++;
-				token = strtok(NULL, " ");
-			}
-		}
-	}
-
-	printf("data block to write : \r\n");
-	print_bytes_matrix(test_buf, 512, 16, ascii);
-
-	printf("proceed to write data ? (y/n) : ");
-	gets_pol(s);
-
-	if( (s[0] == 'Y') || (s[0] == 'y') ){
-		printf("start writing\r\n");
-
-		res = sdc_SingleBlockWrite(test_buf, addr);
-
-		printf("result : %#02x %#02x %#02x %#02x\r\n",
-				res.cmd_resp,
-				res.dat_resp,
-				res.cmd12_resp,
-				res.prv);
-	}
-	else
-		printf("aborted\r\n");
-
-
-}
-
-// command format : mread  [a] [b]
-// a : read address by sector in hexadecimal
-// b : "ascii" -> print the data to be translated by ascii code
-//     else or not specified : print the data by hexadecimal (00 ~ ff)
-void test_mread()
-{
-	unsigned long addr;
-	unsigned int count, i;
-	char s[100];
-	SDC_RW_RESULT result;
-
-	bool ascii = false;
-
-
-	if(commandline_get_arg(1, s, 20))
-		addr = strtoul(s, NULL, 16);
-	else{
-		printf("no address\r\n");
-		return;
-	}
-
-	if(commandline_get_arg(2, s, 20)){
-		if(strcmp(s, "ascii") == 0)
-			ascii = true;
-	}
-
-	printf("block count (0~%d) : ", N_BLOCK_SD);
-	gets_pol(s);
-	count = (unsigned int)strtoul(s, NULL, 10);
-	if(count > N_BLOCK_SD)
-		count = N_BLOCK_SD;
-
-	result = sdc_MultiBlockRead(test_buf, addr, count);
-
-	printf("result : %#02x %#02x %#02x %#02x\r\n",
-			result.cmd_resp,
-			result.err_token,
-			result.cmd12_resp,
-			result.prv);
-
-	if(result.result)
-		printf("multi block read failed\r\n");
-	else{
-		printf("data : \r\n");
-		for(i = 0; i < count ; i++)
-			print_bytes_matrix(test_buf+i*512, 512, 16, ascii);
-	}
-}
-
-// command format : mwrite [a]
-// a : write address by sector in hexadecimal
-void test_mwrite()
-{
-	unsigned long addr;
-	unsigned int count, i;
-	char s[100];
-	uint8_t fill_data;
-	SDC_RW_RESULT result;
-
-
-	if(commandline_get_arg(1, s, 20))
-		addr = strtoul(s, NULL, 16);
-	else{
-		printf("no address\r\n");
-		return;
-	}
-
-	printf("block count (0~%d) : ", N_BLOCK_SD);
-	gets_pol(s);
-	count = (unsigned int)strtoul(s, NULL, 10);
-	if(count > N_BLOCK_SD)
-		count = N_BLOCK_SD;
-
-	printf("fill data byte : ");
-	gets_pol(s);
-	fill_data = (uint8_t)strtoul(s, NULL, 16);
-
-	for(i = 0; i < count * 512; i++)
-		test_buf[i] = fill_data;
-
-	result = sdc_MultiBlockWrite(test_buf, addr, count);
-
-	printf("result : %#02x %#02x %#02x %#02x\r\n",
-			result.cmd_resp,
-			result.dat_resp,
-			result.cmd12_resp,
-			result.prv);
-
-}
-
-void print_bytes_matrix(uint8_t *buf, int count, int n_col, bool ascii)
-{
-	int i, j;
-	uint8_t tmp;
-
-	for(i = 0; i < 1000; i++){
-		printf("%#8x : ", i);
-		for(j = 0; j < n_col; j++){
-			if(i*n_col + j >= count){
-				i++;
-				break;
-			}
-			tmp = buf[i*n_col + j];
-			if(ascii){
-				if( (tmp < 0x20) | (tmp > 0x7e) ){
-//						printf("xx ");
-					printf("%02x ", tmp);
-				}
-				else
-					printf(" %c ", tmp);
-			}
-			else{
-				printf("%02x ", tmp);
-			}
-		}
-		printf("\r\n");
-		if(i*n_col >= count)
-			break;
-	}
-	printf("\r\n");
-
-}
-
-// command format : blocksize
-// (no argument)
-// get erase block count of SD card
-void test_blocksize()
-{
-	unsigned long res;
-
-	res = sdc_EraseBlockSize();
-	printf("erase block count : %d\r\n", res);
-
-}
-
-// command format : blocksize
-// (no argument)
-// get sector count of SD card
-void test_sectorcount()
-{
-	unsigned long res;
-
-	res = sdc_SectorCount();
-	printf("sector count : %d\r\n", res);
-	printf("capacity : %d [MB]\r\n", res >> 11);
-}
-
-// command format : f_mount [a]
-// a : "clear" ->
-// media initialization is done in this function
-void test_f_mount()
-{
-	FRESULT res;
-	char s[20];
-	FATFS *p_fatfs;
-
-	if(commandline_get_arg(1, s, 20)){
-		if(strcmp(s, "clear") == 0)
-			p_fatfs = NULL;
-		else
-			p_fatfs = &fatfs;
-	}
-	else
-		p_fatfs = &fatfs;
-
-	res = f_mount(p_fatfs
-			, "SD1" // physical drive number :
-			, 1 // option : 1 -> do mount action
-			);
-
-	printf("f_mount result : %d\r\n", res);
-}
-
-
-
-//// UNIX like commands ////
-
-// command format : pwd
-// (no argument)
-void test_pwd()
-{
-	FRESULT res;
-
-	res = f_getcwd(ff_cwd, 256);
-	printf("f_getcwd result : %d\r\n", res);
-
-	if(res == FR_OK)
-		printf("current directory : %s\r\n", ff_cwd);
-}
-
-
-// command format : cd [a]
-// a : directory name
-void test_cd()
-{
-	FRESULT res;
-	char s[256];
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no directory specified\r\n");
-		return;
-	}
-
-	res = f_chdir(s);
-	printf("f_chdir result : %d\r\n", res);
-
-	if(res == FR_OK)
-		printf("cd succeeded\r\n");
-	else
-		printf("cd failed\r\n");
-}
-
-
-// command format : ls
-// (no argument)
-void test_ls()
-{
-	FRESULT res;
-	TCHAR *fn;
-	int i;
-
-	res = f_getcwd(ff_cwd, 256);
-	if(res != FR_OK){
-		printf("f_getcwd failed : %d\r\n", res);
-		return;
-	}
-	else
-		printf("current directory : %s\r\n", ff_cwd);
-
-	ff_info.lfname = ff_fname;
-	ff_info.lfsize = 256;
-
-	res = f_opendir(&ff_dir, ff_cwd);
-	if(res != FR_OK){
-		printf("f_opendir failed : %d\r\n", res);
-		return;
-	}
-	else
-		printf("current directory opened\r\n");
-
-	for(i = 0; i < 1000; i++){
-		res = f_readdir(&ff_dir, &ff_info);
-		if(res != FR_OK){
-			printf("f_readdir failed : %d\r\n", res);
-			break;
-		}
-
-		if(ff_info.fname[0] == '\0') // no more content
-			break;
-
-		if(ff_info.lfname[0] == '\0')
-			fn = ff_info.fname;
-		else
-			fn = ff_info.lfname;
-
-		printf(" %3d ", i);
-
-		if (ff_info.fattrib & AM_DIR)
-            printf("DIR  : ");
-        else
-        	printf("FILE : ");
-
-        printf("%s\r\n", fn);
-
-	}
-	f_closedir(&ff_dir);
-
-}
-
-// command format : cat [a]
-// a : file name
-void test_cat()
-{
-	FRESULT res;
-	unsigned int n_read;
-	char s[256];
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no file specified\r\n");
-		return;
-	}
-
-	res = f_open(&ff_file, s, FA_READ);
-
-	if(res == FR_OK){
-		do{
-			res = f_read(&ff_file, (void *)test_buf, 2048, &n_read);
-			if(res == FR_OK){
-				printf("%s\r\n next? y -> next, else -> end", test_buf);
-				if(uart_getc() == 'y')
-					printf("\r\n");
-				else
-					break;
-			}
-			else{
-				printf("f_read failed\r\n");
-				break;
-			}
-		}while(n_read == 2048);
-		printf("\r\n");
-		f_close(&ff_file);
-	}
-	else if(res == FR_NO_FILE)
-		printf("file does not exist\r\n");
-	else
-		printf("f_open failed\r\n");
-
-}
-
-
-// command format : f_open [a]
-// a : file name
-// create new file
-void test_f_open()
-{
-	FRESULT res;
-	char s[256];
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no file specified\r\n");
-		return;
-	}
-
-	res = f_open(&ff_file, s, FA_READ | FA_CREATE_NEW);
-
-	if(res == FR_OK){
-		printf("f_open succeeded\r\n");
-		f_close(&ff_file);
-	}
-	else if(res == FR_EXIST)
-		printf("specified file already exists\r\n");
-	else
-		printf("f_open failed\r\n");
-
-}
-
-// command format : f_write [a] [b] [c]
-// a : file name
-// b : "ascii" -> input data are specified by ascii characpters
-//     else or not specified -> write data are specified by array of hexadecimal data
-// c : "append" -> append to the end of the file
-//     else or not specified -> overwrite
-void test_f_write()
-{
-	FRESULT res;
-	bool ascii = false, append = false;
-	char s[256], *token;
-	int n_data, i;
-	unsigned int n_data_ret;
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no file specified\r\n");
-		return;
-	}
-
-	res = f_open(&ff_file, s, FA_WRITE);
-
-	i = 2;
-	while(commandline_get_arg(i, s, 256)){
-		if(strcmp(s, "ascii") == 0)
-			ascii = true;
-		else if(strcmp(s, "append") == 0)
-			append = true;
-
-		i++;
-	}
-
-	if(res == FR_NO_FILE)
-		printf("file does not exist\r\n");
-	else if(res != FR_OK)
-		printf("file open error\r\n");
-	else{
-		if(append){
-			res = f_lseek(&ff_file, f_size(&ff_file));
-		}
-		else{
-			res = f_truncate(&ff_file);
-		}
-
-		printf("data to write : \r\n");
-		gets_pol(s);
-
-		//// put data to write into the buffer ////
-		if(ascii){
-			strncpy((char *)test_buf, s, 2048);
-			n_data = strlen(test_buf);
-		}
-		else{
-			n_data = 0;
-			token = strtok(s, " ");
-			while(token != NULL){
-				if(n_data >= 2048)
-					break;
-				else{
-					test_buf[n_data] = strtoul(token, NULL, 16);
-					n_data++;
-					token = strtok(NULL, " ");
-				}
-			}
-		}
-
-		printf("write data : \r\n %s\r\n", test_buf);
-		printf("n_data : %d\r\n", n_data);
-
-		res = f_write(&ff_file, test_buf, n_data, &n_data_ret);
-		if(res == FR_OK)
-			printf("f_write succeeded\r\n");
-		else
-			printf("f_write failed\r\n");
-
-	}
-	f_close(&ff_file);
-
-}
-
-void test_mkdir()
-{
-	FRESULT res;
-	char s[256];
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no directory name specified\r\n");
-		return;
-	}
-
-	res = f_mkdir(s);
-	if(res == FR_OK)
-		printf("f_mkdir succeeded\r\n");
-	else
-		printf("f_mkdir failed\r\n");
-
-}
-
-void test_f_stat()
-{
-    FRESULT fr;
-    FILINFO fno;
-
-	char s[256];
-
-	if(!commandline_get_arg(1, s, 256)){
-		printf("no file or directory name specified\r\n");
-		return;
-	}
-
-#if _USE_LFN
-    fno.lfname = 0;
-#endif
-    fr = f_stat(s, &fno);
-    switch (fr) {
-
-    case FR_OK:
-        printf("Size: %u\r\n", fno.fsize);
-        printf("Timestamp: %u/%02u/%02u, %02u:%02u\r\n",
-               (fno.fdate >> 9) + 1980, fno.fdate >> 5 & 15, fno.fdate & 31,
-               fno.ftime >> 11, fno.ftime >> 5 & 63);
-        printf("Attributes: %c%c%c%c%c\r\n",
-               (fno.fattrib & AM_DIR) ? 'D' : '-',
-               (fno.fattrib & AM_RDO) ? 'R' : '-',
-               (fno.fattrib & AM_HID) ? 'H' : '-',
-               (fno.fattrib & AM_SYS) ? 'S' : '-',
-               (fno.fattrib & AM_ARC) ? 'A' : '-');
-        break;
-
-    case FR_NO_FILE:
-        printf("It is not exist.\r\n");
-        break;
-
-    default:
-        printf("An error occured. (%d)\r\n", fr);
-    }
-}
-
-
-// command format : adxl345_cs [a]
-// a : 0, l, or L -> set sd_cs pin LOW
-//     1, h, or H -> set sd_cs pin HIGH
-//     other or not specified -> alternate sd_cs pin state
-void test_adxl345_cs()
-{
-	char s[20];
-	static bool last;
-
-	commandline_get_arg(1, s, 20);
-	SCI6_ADXL345_CS = ( last = test_gpio(last, s[0]) );
-}
-
-// command format : adxl345_tx [a]
-// a : data to send to SD card in hexadecimal (00 ~ ff)
-//     up to 19 data are accepted (separated by space)
-void test_adxl345_tx()
-{
-	int i, n_bytes;
-	uint8_t tx_bytes[19], rx_bytes[19];
-	char s[20];
-
-	n_bytes = commandline_narg() - 1;
-
-	for(i = 0; i < n_bytes; i++){
-		commandline_get_arg(i+1, s, 20);
-		tx_bytes[i] = (uint8_t)strtoul(s, NULL, 16);
-	}
-
-	printf("input : ");
-	for(i = 0; i < n_bytes; i++)
-		printf("%#02x ", tx_bytes[i]);
-	printf("\r\n");
-
-	for(i = 0; i < n_bytes; i++)
-		rx_bytes[i] = sci6_ADXL345_transceive(tx_bytes[i]);
-
-
-	printf("response : ");
-	for(i = 0; i < n_bytes; i++)
-		printf("%#02x ", rx_bytes[i]);
-	printf("\r\n");
-
-}
-
-void test_adxl345_init()
-{
-//	ADXL345_init();
-	printf("initialize completed\r\n");
-}
-
-// command format : adxl345_reg [a] [b] [c]
-// a : "W" or "w" -> write operation,
-//     "R" or "r" -> read operation
-// b : register address in hexadecimal
-// c : number of multi access in decimal (optional)
-void test_adxl345_reg()
-{
-	char s[20];
-	char addr, wdata[20];
-	bool r_w;
-	int n_transfer, i;
-
-
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-	if(commandline_get_arg(1, s, 20)){
-		if( (s[0] == 'W') || (s[0] == 'w') )
-			r_w = false;
-		else if( (s[0] == 'R') || (s[0] == 'r') )
-			r_w = true;
-		else{
-			printf("R or W must be specified\r\n");
-			return;
-		}
-
-	}
-	else{
-		printf("R or W must be specified\r\n");
-		return;
-	}
-
-	if(!commandline_get_arg(2, s, 20)){
-		printf("address must be specified\r\n");
-		return;
-	}
-	else
-		addr = strtoul(s, NULL, 16);
-
-	if(commandline_get_arg(4, s, 20)){
-		n_transfer = strtoul(s, NULL, 10);
-		if(n_transfer > 20)
-				n_transfer = 20;
-	}
-	else
-		n_transfer = 1;
-
-	if(r_w){
-		if(n_transfer > 1)
-			ADXL345_multi_read(addr, s, n_transfer);
-		else
-			ADXL345_single_read(addr, s);
-
-		printf("read data : \r\n");
-		printf("%x", s[0]);
-		for(i = 1; i < n_transfer; i++){
-			printf(", %x", s[i]);
-		}
-		printf("\r\n");
-	}
-	else{
-		printf("data to write : \r\n");
-		for(i = 0; i < n_transfer; i++){
-			gets_pol(s);
-			wdata[i] = strtoul(s, NULL, 16);
-		}
-
-		if(n_transfer > 1)
-			ADXL345_multi_write(addr, wdata, n_transfer);
-		else
-			ADXL345_single_write(addr, wdata[0]);
-	}
-
-
-}
-
-
-void test_adxl345_mon()
-{
-	signed short data[3], data_last[3];
-	signed short xs, xe, ys, ye;
-
-	printf("\r\nADXL345 monitoring\r\npress any key to quit\r\n");
-	printf("    X,    Y,    Z\r\n");
-
-	xs = 0; xe = 159; ys = 0; ye = 127;
-	lcdc_set_area(xs, xe, ys, ye);
-
-	ADXL345_start();
-	ADXL345_int_enable(ADXL345_INT_BIT_DATA_READY);
-
-	while(!uart_kbhit()){
-		while(!ADXL345_ready()) ;
-		ADXL345_get(data);
-		printf("%5d,%5d,%5d\r", data[0], data[1], data[2]);
-
-		lcdc_fill(LCDC_BLACK);
-		lcdc_fill_area(0x8410, 80,80,0,127);
-		lcdc_fill_area(0x8410, 0,159,64,64);
-		lcdc_fill_area(LCDC_BLUE
-				, (- data[1] >> 3) + 80 - 1
-				, (- data[1] >> 3) + 80 + 1
-				, (- data[0] >> 3) + 64 - 1
-				, (- data[0] >> 3) + 64 + 1);
-
-	}
-
-	ADXL345_stop();
-	ADXL345_int_enable(0x0);
-
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-}
-
-
-_SWORD curve_adxl345_x(_UWORD t)
-{
-	return (((_SWORD *)test_buf)[t*3] >> 3);
-}
-
-_SWORD curve_adxl345_y(_UWORD t)
-{
-	return (((_SWORD *)test_buf)[t*3+1] >> 3);
-}
-
-_SWORD curve_adxl345_z(_UWORD t)
-{
-	return (((_SWORD *)test_buf)[t*3+2] >> 3);
-}
-
-
-void test_adxl345_log()
-{
-	signed short *p_data;
-	int i;
-
-	printf("\r\nADXL345 logging\r\n");
-	printf("log depth : %d\r\n", ADXL345_LOG_DEPTH);
-	printf("press any key to start\r\n");
-
-	while(!uart_kbhit()) ;
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-	p_data = (signed short *)test_buf;
-
-	ADXL345_start();
-	ADXL345_int_enable(ADXL345_INT_BIT_DATA_READY);
-
-	for(i = 0; i < ADXL345_LOG_DEPTH; i++){
-		while(!ADXL345_ready()) ;
-		ADXL345_get(p_data);
-
-		p_data += 3;
-	}
-
-	p_data = (signed short *)test_buf;
-	printf("stored data\r\n");
-	printf("    i,    X,    Y,    Z\r\n");
-	for(i = 0; i < ADXL345_LOG_DEPTH; i++){
-		printf("%5d, %5d, %5d, %5d\r\n", i, p_data[0], p_data[1], p_data[2]);
-		p_data += 3;
-	}
-
-	ADXL345_stop();
-	ADXL345_int_enable(0x0);
-
-	printf("\r\n");
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-	lcdc_fill_area(LCDC_BLACK, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_x, 64, LCDC_RED, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_y, 64, LCDC_GREEN, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_z, 64, LCDC_BLUE, 0, 0x9F, 0, 0x7F);
-
-}
-
-
-void test_adxl345_logf()
-{
-	FRESULT res;
-	FIL logfile;
-	signed short data[3];
-	signed short *p_data;
-	int i, j;
-
-
-	f_open(&logfile, "adxl345_log.csv", FA_OPEN_ALWAYS);
-	f_lseek(&logfile, f_size(&logfile)); // move cursor to end position
-
-	f_printf(&logfile, "\r\n----\r\n");
-	printf("Start logging\r\n");
-
-	ADXL345_start();
-	ADXL345_int_enable(ADXL345_INT_BIT_DATA_READY);
-
-	while(!uart_kbhit()){
-
-		p_data = (signed short *)test_buf;
-
-		for(i = 0; i < LCDC_ROW; i++){
-			while(!ADXL345_ready())
-				;
-			ADXL345_get(p_data);
-			f_printf(&logfile, "%d,%d,%d\r\n", p_data[0], p_data[1], p_data[2]);
-			printf(".");
-		}
-
-
-	}
-
-	ADXL345_stop();
-	ADXL345_int_enable(0x0);
-
-	f_close(&logfile);
-}
-
-void test_adxl345_int()
-{
-	printf("press any key to quit\r\n");
-
-	ADXL345_stop();
-	ADXL345_get(adxl345_received_data); // clear data buffer
-	ADXL345_int_enable(ADXL345_INT_BIT_DATA_READY);
-	adxl345int1_int_enable();
-	ADXL345_start();
-
-	while(!uart_kbhit()){
-		if(adxl345_received_flag){
-			adxl345int1_int_disable();
-			printf("%5d,%5d,%5d\r", adxl345_received_data[0]
-								 , adxl345_received_data[1]
-								 , adxl345_received_data[2]);
-			adxl345_received_flag = 0;
-			adxl345int1_int_enable();
-		}
-	}
-
-	adxl345int1_int_disable();
-	ADXL345_stop();
-	ADXL345_int_enable(0x0);
-
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-}
-
-// LCD
-void test_lcd_init()
-{
-	lcdc_init();
-	printf("LCD initialization completed\r\n");
-}
-
-void test_lcd_cs()
-{
-	char s[20];
-	static bool last;
-
-	commandline_get_arg(1, s, 20);
-	LCD_CS = ( last = test_gpio(last, s[0]) );
-}
-
-void test_lcd_rs()
-{
-	char s[20];
-	static bool last;
-
-	commandline_get_arg(1, s, 20);
-	LCD_RS = ( last = test_gpio(last, s[0]) );
-}
-
-void test_lcd_nrst()
-{
-	char s[20];
-	static bool last;
-
-	commandline_get_arg(1, s, 20);
-	LCD_NRST = ( last = test_gpio(last, s[0]) );
-}
-
-void test_lcd_tx()
-{
-	int i, n_bytes;
-	uint8_t tx_bytes[19];
-	char s[20];
-
-	n_bytes = commandline_narg() - 1;
-
-	for(i = 0; i < n_bytes; i++){
-		commandline_get_arg(i+1, s, 20);
-		tx_bytes[i] = (uint8_t)strtoul(s, NULL, 16);
-	}
-
-	printf("input : ");
-	for(i = 0; i < n_bytes; i++)
-		printf("%#02x ", tx_bytes[i]);
-	printf("\r\n");
-
-	for(i = 0; i < n_bytes; i++)
-		sci12_LCD_transmit(tx_bytes[i]);
-}
-
-void test_lcd_clk()
-{
-	sci12_LCD_com_mode(SCI12_GPIORX); // GPIO RX mode
-
-	sci12_LCD_dummy_clock();
-
-	sci12_LCD_com_mode(SCI12_SPITX); // SPI TX mode
-}
-
-void test_lcd_rx()
-{
-	sci12_LCD_com_mode(SCI12_GPIORX); // GPIO RX mode
-
-	printf("%x\r\n", sci12_LCD_read());
-
-	sci12_LCD_com_mode(SCI12_SPITX); // SPI TX mode
-}
-
-
-// command format : lcd_area [xs] [xe] [ys] [ye]
-// xs : horizontal start point
-// xe : horizontal end point
-// ys : vertical start point
-// ye : vertical end point
-void test_lcd_area()
-{
-	char s[20];
-	bool failed = false;
-
-	_UWORD xs, xe, ys, ye;
-
-	if(commandline_get_arg(1, s, 20))
-		xs = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(commandline_get_arg(2, s, 20))
-		xe = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(commandline_get_arg(3, s, 20))
-		ys = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(commandline_get_arg(4, s, 20))
-		ye = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(failed)
-		printf("insufficient arguments\r\n");
-	else
-		lcdc_set_area(xs, xe, ys, ye);
-}
-
-
-// command format : lcd_fill [r] [g] [b]
-// r : RED brightness (in hexadecimal)
-// g : GREEN brightness (in hexadecimal)
-// b : BLUE brightness (in hexadecimal)
-void test_lcd_fill()
-{
-	_UWORD color, color_r, color_g, color_b;
-	char s[20];
-	unsigned long tm;
-
-	if(!commandline_get_arg(3, s, 20))
-		printf("color argument is missing\r\n");
-	else{
-		color_b = (_UWORD)strtoul(s, NULL, 16);
-
-		commandline_get_arg(2, s, 20);
-		color_g = (_UWORD)strtoul(s, NULL, 16);
-
-		commandline_get_arg(1, s, 20);
-		color_r = (_UWORD)strtoul(s, NULL, 16);
-	}
-
-	color = (color_r << 11) | (color_g << 5) | color_b;
-	printf("color:%x\r\n", color);
-
-	timer_soft_reset(&tm);
-	lcdc_fill(color);
-
-	printf("Elapsed time : %dms\r\n", timer_soft_count(&tm));
-}
-
-// command format : lcd_test [a] [b] [c]
-// a : character to display
-// b : x position (hexadecimal)
-// c : y position (hexadecimal)
-void test_lcd_putc()
-{
-	_UWORD x, y;
-	char c;
-	char s[20];
-	bool failed = false;
-
-	if(commandline_get_arg(3, s, 20))
-		y = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(commandline_get_arg(2, s, 20))
-		x = strtoul(s, NULL, 16);
-	else
-		failed = true;
-
-	if(commandline_get_arg(1, s, 20))
-		c = s[0];
-	else
-		failed = true;
-
-	if(failed)
-		printf("insufficient arguments\r\n");
-	else
-		lcdc_putchar(c, LCDC_WHITE, x, y);
-
-}
-
-void test_lcd_puts()
-{
-	char s[100];
-	printf("string to display : \r\n");
-	gets_pol(s);
-
-	lcdc_puts(s, LCDC_WHITE, 0,0);
-}
-
-void test_lcd_rinv()
-{
-	lcdc_row_invert();
-}
-
-void test_lcd_cinv()
-{
-	lcdc_col_invert();
-}
-
-void test_lcd_ainv()
-{
-	lcdc_row_col_exchange();
-}
-
-#ifdef ST7735S_REG_ACCESS
-
-// command format : lcd_reg [a] [b]
-// a : "W" or "w" -> write operation,
-//     "R" or "r" -> read operation
-// b : register address in hexadecimal
-void test_lcd_reg()
-{
-	char s[20];
-	unsigned char addr;
-	ST7735S_REG_TYPE r_w;
-	int n_transfer, i;
-	bool no_read = true;
-
-
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-	if(commandline_get_arg(1, s, 20)){
-		if( (s[0] == 'W') || (s[0] == 'w') )
-			r_w = REG_W;
-		else if( (s[0] == 'R') || (s[0] == 'r') )
-			r_w = REG_R;
-		else{
-			printf("R or W must be specified\r\n");
-			return;
-		}
-
-	}
-	else{
-		printf("R or W must be specified\r\n");
-		return;
-	}
-
-	if(!commandline_get_arg(2, s, 20)){
-		printf("address must be specified\r\n");
-		return;
-	}
-	else{
-		addr = strtoul(s, NULL, 16);
-	}
-
-	if(!ST7735S_open(addr, r_w))
-		printf("ST7735S_open failed\r\n");
-	else
-		printf("opened ST7735S register\r\n");
-
-
-	if(r_w == REG_R){
-		test_lcd_read();
-	}
-	else if(r_w == REG_W){
-		test_lcd_write();
-	}
-
-	ST7735S_close();
-
-}
-
-// command format : lcd_open [a] [b]
-// a : "W" or "w" -> write operation,
-//     "R" or "r" -> read operation
-// b : register address in hexadecimal
-void test_lcd_open()
-{
-	char s[20];
-	unsigned char addr;
-	ST7735S_REG_TYPE r_w;
-	int n_transfer, i;
-	bool no_read = true;
-
-
-	while(uart_kbhit()) uart_getc(); // clear UART buffer
-
-	if(commandline_get_arg(1, s, 20)){
-		if( (s[0] == 'W') || (s[0] == 'w') )
-			r_w = REG_W;
-		else if( (s[0] == 'R') || (s[0] == 'r') )
-			r_w = REG_R;
-		else{
-			printf("R or W must be specified\r\n");
-			return;
-		}
-
-	}
-	else{
-		printf("R or W must be specified\r\n");
-		return;
-	}
-
-	if(!commandline_get_arg(2, s, 20)){
-		printf("address must be specified\r\n");
-		return;
-	}
-	else{
-		addr = strtoul(s, NULL, 16);
-	}
-
-	if(!ST7735S_open(addr, r_w))
-		printf("ST7735S_open failed\r\n");
-	else
-		printf("opened ST7735S register\r\n");
-
-}
-
-
-void test_lcd_write()
-{
-	char s[20];
-	unsigned char data;
-
-	while(1){
-		printf("data to write (q:end) : \r\n");
-
-		if(!gets_q(s, 20))
-			break;
-
-		timer_soft_wait(10);
-		while(uart_kbhit())
-			uart_getc(); // clear UART buffer
-
-		data = (unsigned char)strtoul(s, NULL, 16);
-		printf("write data : %x\r\n", data);
-		ST7735S_write(&data, 1);
-
-		}
-
-}
-
-void test_lcd_read()
-{
-	char c;
-	int n_transfer;
-	unsigned char data;
-
-	while(1){
-		n_transfer = ST7735S_read(&data, 1);
-		if(n_transfer){
-			printf("read data (n:continue,else:end) : %x\r\n", data);
-
-			c = uart_getc();
-			uart_putc('\b');
-
-			while(uart_kbhit())
-				uart_getc();
-
-			if(c != 'n')
-				break;
-		}
-		else{
-			printf("No more to read\r\n");
-			break;
-		}
-	}
-
-}
-
-void test_lcd_close()
-{
-	ST7735S_close();
-}
-
-
-#endif // ST7735S_REG_ACCESS
-
-
-unsigned char test_gpio(bool last, char opt)
-{
-	bool rtn;
-
-	if(opt == '\0')
-		rtn = !last;
-	else if( (opt == '0') || (opt == 'L') || (opt == 'l') )
-		rtn = false;
-	else
-		rtn = true;
-
-	printf("port level => ");
-	if(rtn)
-		uart_putc('H');
-	else
-		uart_putc('L');
-
-	uart_putc('\r'); uart_putc('\n');
-
-	return rtn;
-}
