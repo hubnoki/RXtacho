@@ -474,12 +474,16 @@ void lcdc_draw_pixel(_UWORD color, _UWORD x0, _UWORD y0)
 	lcdc_fill_area(color, x0, x0, y0, y0);
 }
 
-void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _UWORD color, _UWORD x_start, _UWORD x_end, _UWORD y_start, _UWORD y_end)
+// _SWORD curve(_UWORD) : curve function
+// sweep x direction
+// dir : Y axis direction, 0 -> from y_start to y_end , 1 -> from y_end to y_start
+void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _SWORD dir, _UWORD color
+				, _UWORD x_start, _UWORD x_end, _UWORD y_start, _UWORD y_end)
 {
 	_UWORD x_tmp, y_tmp;
 
 	for(x_tmp = x_start; x_tmp <= x_end; x_tmp++){
-		y_tmp = curve(x_tmp) + offset;
+		y_tmp = offset + ((dir == 0) ? curve(x_tmp) : -curve(x_tmp));
 		if( (y_tmp >= y_start) && (y_tmp <= y_end) )
 			lcdc_draw_pixel(color, x_tmp, y_tmp);
 	}

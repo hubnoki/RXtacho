@@ -1223,9 +1223,9 @@ static void test_adxl345_log()
 	while(uart_kbhit()) uart_getc(); // clear UART buffer
 
 	lcdc_fill_area(LCDC_BLACK, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_x, 64, LCDC_RED, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_y, 64, LCDC_GREEN, 0, 0x9F, 0, 0x7F);
-	lcdc_draw_curve(curve_adxl345_z, 64, LCDC_BLUE, 0, 0x9F, 0, 0x7F);
+	lcdc_draw_curve(curve_adxl345_x, 64, 0, LCDC_RED, 0, 0x9F, 0, 0x7F);
+	lcdc_draw_curve(curve_adxl345_y, 64, 0, LCDC_GREEN, 0, 0x9F, 0, 0x7F);
+	lcdc_draw_curve(curve_adxl345_z, 64, 0, LCDC_BLUE, 0, 0x9F, 0, 0x7F);
 
 }
 

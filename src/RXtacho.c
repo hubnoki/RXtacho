@@ -151,7 +151,8 @@ static const ST_VALUE_UNIT value_list_range[] = {
 };
 
 static const ST_VALUE_UNIT value_list_fft_scale[] = {
-	{"9", 9}
+	{"0", 0}
+	, {"9", 9}
 	, {"8", 8}
 	, {"7", 7}
 	, {"6", 6}
@@ -202,7 +203,9 @@ static struct{
 	uint8_t 		g_buf_sel; // Buffer side to save G sensor data
 	uint16_t 		g_buf_wp_a;
 	uint16_t 		g_buf_wp_b;
+	uint16_t		g_buf_wcnt_a; // For logging mode
 	uint16_t 		g_buf_rp;
+	uint16_t		g_buf_rcnt; // For logging mode
 	uint8_t 		g_overrun;
 
 	uint8_t 		logging;
@@ -210,6 +213,7 @@ static struct{
 	int				log_format;
 
 	int 			fft_disp_scale;
+	int				fft_disp_scale_auto;
 
 	int				setting_state;
 	int				cur_setting_idx;
@@ -232,23 +236,23 @@ void adxl345_int_routine()
 
 	// Overrun flag for logging mode
 	if(vars.mode == MODE_LOGGING)
-		vars.g_overrun = (vars.g_buf_wp_a == vars.g_buf_rp);
+		// vars.g_overrun = (vars.g_buf_wp_a == vars.g_buf_rp);
+		vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_GBUF-1;
 
 	ADXL345_get(d);
-	if(vars.axis_sel == AXIS_X)
-		f = fix_int2fix((int)d[0]);
-	else if(vars.axis_sel == AXIS_Y)
-		f = fix_int2fix((int)d[1]);
-	else if(vars.axis_sel == AXIS_Z)
-		f = fix_int2fix((int)d[2]);
-	else
-		f = 0;
+	switch(vars.axis_sel){
+		case AXIS_X : f = fix_int2fix((int)d[0]); break;
+		case AXIS_Y : f = fix_int2fix((int)d[1]); break;
+		case AXIS_Z : f = fix_int2fix((int)d[2]); break;
+		default : f = 0; break;		
+	}
 
 	// Put data into buffer
 	if(vars.logging){
 		vars.g_buf_a[vars.g_buf_wp_a] = f;
 		if(++vars.g_buf_wp_a >= N_GBUF)
 			vars.g_buf_wp_a = 0;
+		vars.g_buf_wcnt_a++;
 	}
 	else{
 		if(vars.g_buf_sel == SEL_A){
@@ -318,7 +322,7 @@ static inline FRESULT umount_SD()
 }
 
 /**
- * @brief 	Get the sequntial number for the next file
+ * @brief 	Get the sequential number for the next file
  * 			Sequential number is expected to exist before ".[extention]" in the file name
  * 
  * @param f_hdr		File name header, and '*' should be added last
@@ -375,64 +379,99 @@ static int get_file_sqno(char f_hdr[], int *sqno)
 	return 0;
 }
 
+// f[0] : Real part
+// f[1] : Imaginary part
+static double fix_cabs(FIX_T *f)
+{
+	int i1;
+	double d1, d2;
+
+	i1 = fix_fix2int(f[0]); // Re
+	d1 = i1;
+	d1 *= i1; // Re^2
+	d2 = d1;
+
+	i1 = fix_fix2int(f[1]); // Im
+	d1 = i1;
+	d1 *= i1; // Im^2
+	d2 += d1;
+
+	return sqrt(d2);
+}
 
 static _SWORD FFT_curve(_UWORD x, FIX_T *buf)
 {
-	int i1;
-	double d1, d2, d3;
-	_SWORD s1;
+	double d3;
 
-	d3 = 0.0;
+	d3 = fix_cabs(&(buf[x*4]));
+	d3 += fix_cabs(&(buf[x*4+2]));
 
-	i1 = fix_fix2int(buf[x*4]); // Re(0)
-	d1 = i1;
-	d1 *= i1; // Re(0)^2
-	d2 = d1;
-	i1 = fix_fix2int(buf[x*4+1]); // Im(0)
-	d1 = i1;
-	d1 *= i1; // Im(0)^2
-	d2 += d1;
-	d3 += sqrt(d2); // sqrt(Re(0)^2 + Im(0)^2)
-
-	i1 = fix_fix2int(buf[x*4+2]); // Re(1)
-	d1 = i1;
-	d1 *= i1; // Re(1)^2
-	d2 = d1;
-	i1 = fix_fix2int(buf[x*4+1]); // Im(1)
-	d1 = i1;
-	d1 *= i1; // Im(1)^2
-	d2 += d1;
-	d3 += sqrt(d2); // sqrt(Re(1)^2 + Im(1)^2)
-
-	s1 = (d3 < (double)INT16_MAX) ? (_SWORD)d3 : INT16_MAX;
-	return -(s1 >> (vars.fft_disp_scale));
-
+	return (d3 < (double)INT16_MAX) ? (_SWORD)d3 : INT16_MAX;
 }
 
 static _SWORD FFT_curve_a(_UWORD x)
 {
-	return FFT_curve(x, vars.g_buf_a);
+	_SWORD rtn;
+	if(vars.fft_disp_scale == 0){
+		if(vars.fft_disp_scale_auto != 0)
+			rtn = FFT_curve(x, vars.g_buf_a) / vars.fft_disp_scale_auto;
+		else
+			rtn = FFT_curve(x, vars.g_buf_a);
+	}
+	else
+		rtn = FFT_curve(x, vars.g_buf_a) >> vars.fft_disp_scale;
+
+	return rtn;
 }
 
 static _SWORD FFT_curve_b(_UWORD x)
 {
-	return FFT_curve(x, vars.g_buf_b);
+	_SWORD rtn;
+	if(vars.fft_disp_scale == 0){
+		if(vars.fft_disp_scale_auto != 0)
+			rtn = FFT_curve(x, vars.g_buf_b) / vars.fft_disp_scale_auto;
+		else
+			rtn = FFT_curve(x, vars.g_buf_b);
+	}
+	else
+		rtn = FFT_curve(x, vars.g_buf_b) >> vars.fft_disp_scale;
+
+	return rtn;
+}
+
+static void FFT_set_scale(FIX_T *buf)
+{
+	_SWORD tmp1, tmp2;
+	_UWORD i;
+	FIX_T *p_buf;
+
+	tmp1 = 0;
+	for(i = 1; i < 128; i++){ // Ignore DC level
+		tmp2 = FFT_curve(i, buf);
+		if(tmp2 > tmp1) tmp1 = tmp2;
+	}
+	vars.fft_disp_scale_auto = tmp1 / 100;
+	if(vars.fft_disp_scale_auto == 0)
+		vars.fft_disp_scale_auto = 1;
 }
 
 
-static void FFT_log()
+// return : 0 -> Success, 1 -> Error
+static int FFT_log()
 {
 	FRESULT res;
 	int sqno, i;
+	int prres = 0;
+	int rtn = 0;
 
 	if(get_file_sqno("adxl345_FFT_*", &sqno)){
-		return;
+		return 1;
 	}
 
 	res = mount_SD(&(wk.fatfs));
 	if(res != FR_OK){
 		PRINTF("SD open failed\r\n");
-		return;
+		return 1;
 	}
 
 	sprintf(wk.fname, "adxl345_FFT_%03d.csv", sqno);
@@ -440,53 +479,67 @@ static void FFT_log()
 	res = f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW);
 	if(res){
 		PRINTF("File open failed, res=%d\r\n", res);
+		rtn = 1;
 	}
 	else{
 		for(i = 0; i < N_GBUF/2; i++){
 			if(vars.g_buf_sel == SEL_A){
-				f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_b[i*2], vars.g_buf_b[i*2+1]);
+				prres = f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_b[i*2], vars.g_buf_b[i*2+1]);
 			}
 			else{
-				f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_a[i*2], vars.g_buf_a[i*2+1]);
+				prres = f_printf(&(wk.fl), "%d,%d\r\n", vars.g_buf_a[i*2], vars.g_buf_a[i*2+1]);
+			}
+
+			if(prres == EOF){
+				rtn = 1;
+				break;
 			}
 		}
-		f_printf(&(wk.fl), "\r\n");
+		prres = f_printf(&(wk.fl), "\r\n");
+		if(prres == EOF){
+			rtn |= 1;
+		}
+
 		for(i = 0; i < 128; i++){
 			if(vars.g_buf_sel == SEL_A){
-				f_printf(&(wk.fl), "%d\r\n", FFT_curve_b((unsigned short)i));
+				prres = f_printf(&(wk.fl), "%d\r\n", FFT_curve_b((unsigned short)i));
 			}
 			else{
-				f_printf(&(wk.fl), "%d\r\n", FFT_curve_a((unsigned short)i));
+				prres = f_printf(&(wk.fl), "%d\r\n", FFT_curve_a((unsigned short)i));
+			}
+
+			if(prres == EOF){
+				rtn |= 1;
+				break;
 			}
 		}
 		f_close(&(wk.fl));
 	}
 
 	f_mount(0, "SD1", 1); //unmount
-	
 
+	return rtn;
 }
 
 
 //-------------------------------------------------------------------------------------------
 
+static void proc_logging(uint8_t spush, uint8_t lpush);
+static void proc_FFT(uint8_t spush, uint8_t lpush);
+static void proc_meter(uint8_t spush, uint8_t lpush);
+static void proc_setting(uint8_t spush, uint8_t lpush);
+
+
 int main(void)
 {
-	int i;
 	char s[50];
+	int i;
 	unsigned long psw_cnt;
 	uint8_t psw_spush, psw_lpush;
-	uint8_t *tmp_u8_p;
-	uint8_t u8_tmp;
-
-	FRESULT res;
-	UINT btw;
-	UINT tmp;
 
 //---------------------------------------------------------
 	vars.mode = MODE_LOGGING;
 	vars.mode_init = 1;
-	vars.axis_sel = AXIS_Z;
 	vars.psw_state = PSW_READY;
 	vars.g_buf_sel = SEL_A;
 	vars.g_buf_wp_a = 0;
@@ -494,14 +547,21 @@ int main(void)
 	vars.g_buf_rp = 0;
 	vars.g_overrun = 0;
 	vars.logging = 0;
-	vars.log_format = LOG_FMT_BIN;
-	vars.fft_disp_scale = 9;
+
+	vars.fft_disp_scale_auto = 0;
 
 	vars.setting_state = STG_ST_STG;
 	vars.cur_setting_idx = 0;
-	for(i = 0; i < sizeof(setting_list)/sizeof(ST_SETTING_UNIT); i++){
-		vars.cur_value_idx[i] = 0;
-	}
+
+	vars.cur_value_idx[STG_AXIS] = 2;
+	vars.axis_sel = AXIS_Z;
+	vars.cur_value_idx[STG_LOGFMT] = 0;
+	vars.log_format = LOG_FMT_BIN;
+	vars.cur_value_idx[STG_RATE] = 0;
+	vars.cur_value_idx[STG_RANGE] = 0;
+	vars.cur_value_idx[STG_FFTSCALE] = 0;
+	vars.fft_disp_scale = 0;
+	vars.cur_value_idx[STG_EXIT] = 0;
 
 	vars.fft_ip[0] = 0;
 
@@ -527,9 +587,8 @@ int main(void)
 	ADXL345_get_default_config(&(vars.adxl345_cfg));
 	vars.adxl345_cfg.int_map = 0;
 	vars.adxl345_cfg.int_invert = 1;
-	// vars.adxl345_cfg.rate = ADXL345_RATE_3200;
-	vars.adxl345_cfg.rate = ADXL345_RATE_400;
-	vars.adxl345_cfg.range = ADXL345_RANGE_8G;
+	vars.adxl345_cfg.rate = (uint8_t)(setting_list[STG_RATE].list[vars.cur_value_idx[STG_RATE]].val);
+	vars.adxl345_cfg.range = (uint8_t)(setting_list[STG_RANGE].list[vars.cur_value_idx[STG_RANGE]].val);
 	ADXL345_config(&(vars.adxl345_cfg));
 
 
@@ -566,229 +625,297 @@ int main(void)
 		if(vars.psw_state == PSW_SHORT_PUSHED)
 			psw_spush = 1;
 		else if(vars.psw_state == PSW_WAIT_RELEASE){
-			if(timer_soft_count(&(vars.psw_tm)) >= SHORT_PUSH_TH_MS)
+			if(psw_cnt >= SHORT_PUSH_TH_MS)
 				psw_lpush = 1;
 		}
 
 		//// Process for each mode ////
 		//---------
 		if(vars.mode == MODE_LOGGING){
-			if(vars.mode_init){
-				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-				lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
-				lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
-				vars.mode_init = 0;
-			}
-
-			if(!(vars.logging)){
-				// Start logging
-				if(psw_spush){
-					res = 0;
-
-					if(get_file_sqno("adxl345_log_*", &(vars.log_sqno)))
-						res = 1;
-					res |= mount_SD(&(wk.fatfs));
-
-					if(vars.log_format == LOG_FMT_CSV)
-						sprintf(wk.fname, "adxl345_log_%03d.csv", vars.log_sqno);
-					else
-						sprintf(wk.fname, "adxl345_log_%03d.bin", vars.log_sqno);
-					res |= f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW);
-
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-					if(res){
-						lcdc_puts("File open failed", LCDC_WHITE, 0, 0);
-						lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
-					}
-					else{
-						sprintf(s, "Logging ... (%d)", vars.log_sqno);
-						lcdc_puts(s, LCDC_WHITE, 0, 0);
-						lcdc_puts("Short Push to stop ", LCDC_WHITE, 0, 10);
-						vars.logging = 1;
-						adxl345_start();
-					}
-				}
-				else if(psw_lpush){
-					// Mode change
-					vars.mode = MODE_FFT;
-					vars.mode_init = 1;
-				}
-			}
-			else{
-				// Stop logging
-				if(psw_spush){
-					adxl345_stop();
-					vars.logging = 0;
-					f_close(&(wk.fl));
-					umount_SD();
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-					lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
-					lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
-				}
-				// Continue logging
-				else{
-					if(vars.g_buf_wp_a != vars.g_buf_rp){
-						if(vars.log_format == LOG_FMT_CSV){
-							f_printf(&(wk.fl), "%d,%d\r\n"
-								, fix_fix2int(vars.g_buf_a[vars.g_buf_rp]), vars.g_overrun);
-						}
-						else if(vars.log_format == LOG_FMT_BIN){
-							f_write(&(wk.fl), &(vars.g_buf_a[vars.g_buf_rp]), 4, &btw);
-							tmp = vars.g_overrun;
-							f_write(&(wk.fl), &tmp, 4, &btw);
-						}
-						if(++vars.g_buf_rp >= N_GBUF)
-							vars.g_buf_rp = 0;
-						vars.g_overrun = 0;
-					}
-				}
-			}
-
+			proc_logging(psw_spush, psw_lpush);
 		}
 		//---------
 		else if(vars.mode == MODE_FFT){
-			if(vars.mode_init){
-				adxl345_stop();
-				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-				lcdc_puts("FFT mode", LCDC_WHITE, 0, 0);
-				vars.g_buf_sel = SEL_A;
-				vars.g_buf_wp_a = 0;
-				vars.g_buf_wp_b = 0;
-				adxl345_start();
-				vars.mode_init = 0;
-			}
-
-			if(vars.g_buf_sel == SEL_A){
-				if(vars.g_buf_wp_a == N_GBUF){
-					vars.g_buf_sel = SEL_B;
-					for(i = 0; i < 512; i++)
-						vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
-					rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
-					lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
-					lcdc_draw_curve(FFT_curve_a, 120, LCDC_GREEN
-						, 0, 127, 9, 120);
-					vars.g_buf_wp_a = 0;
-				}
-			}
-			else{
-				if(vars.g_buf_wp_b == N_GBUF){
-					vars.g_buf_sel = SEL_A;
-					for(i = 0; i < 512; i++)
-						vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
-					rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 8, LCDC_COL-1);
-					lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
-					lcdc_draw_curve(FFT_curve_b, 120, LCDC_GREEN
-						, 0, 127, 9, 120);
-					vars.g_buf_wp_b = 0;
-				}
-			}
-
-			if(psw_spush){
-				lcdc_puts("Saving ...", LCDC_WHITE, 0, 0);
-				FFT_log();
-				lcdc_puts("FFT mode  ", LCDC_WHITE, 0, 0);
-			}
-			else if(psw_lpush){
-				// Mode change
-				vars.mode = MODE_METER;
-				vars.mode_init = 1;
-			}
-
+			proc_FFT(psw_spush, psw_lpush);
 		}
 		//---------
 		else if(vars.mode == MODE_METER){
-			if(vars.mode_init){
-				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-				lcdc_puts("METER mode", LCDC_WHITE, 0, 0);
-				vars.mode_init = 0;
-			}
-
-			// Mode change
-			if(psw_lpush){
-				vars.mode = MODE_SETTING;
-				vars.mode_init = 1;
-			}
-
+			proc_meter(psw_spush, psw_lpush);
 		}
 		//---------
 		else if(vars.mode == MODE_SETTING){
-
-			if(vars.mode_init || (psw_lpush && (vars.setting_state == STG_ST_VAL))){
-				// Show mode name
-				if(vars.mode_init){
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, 8);
-					lcdc_puts("SETTING mode", LCDC_WHITE, 0, 0);
-					vars.mode_init = 0;
-				}
-				// Show setting list
-				lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
-				for(i = 0; i < (sizeof(setting_list)/sizeof(ST_SETTING_UNIT)); i++){
-					lcdc_puts(setting_list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
-				}
-				// Selection mark
-				lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
-				vars.setting_state = STG_ST_STG;
-			}
-			else if(psw_lpush && (vars.setting_state == STG_ST_STG)){
-				// "exit" menu -> Apply setting values and go to next mode
-				if(strcmp(setting_list[vars.cur_setting_idx].name, "exit") == 0){
-					u8_tmp = (uint8_t)(setting_list[STG_AXIS].list[vars.cur_value_idx[STG_AXIS]].val);
-					vars.axis_sel = u8_tmp;
-					vars.log_format = setting_list[STG_LOGFMT].list[vars.cur_value_idx[STG_LOGFMT]].val;
-					u8_tmp = (uint8_t)(setting_list[STG_RATE].list[vars.cur_value_idx[STG_RATE]].val);
-					ADXL345_set_rate(u8_tmp);
-					u8_tmp = (uint8_t)(setting_list[STG_RANGE].list[vars.cur_value_idx[STG_RANGE]].val);
-					ADXL345_set_range(u8_tmp);
-					tmp = setting_list[STG_FFTSCALE].list[vars.cur_value_idx[STG_FFTSCALE]].val;
-					vars.fft_disp_scale = tmp;
-
-					vars.cur_setting_idx = STG_AXIS;
-					vars.mode = MODE_LOGGING;
-					vars.mode_init = 1;
-				}
-				// Other menu -> Show value list
-				else{
-					lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
-					for(i = 0; i < setting_list[vars.cur_setting_idx].nval; i++){
-						lcdc_puts(setting_list[vars.cur_setting_idx].list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
-					}
-					// Selection mark
-					lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_value_idx[vars.cur_setting_idx]+1)*9);
-					vars.setting_state = STG_ST_VAL;
-				}
-
-			}
-
-			if(psw_spush){
-				if(vars.setting_state == STG_ST_STG){
-					// Increment setting index
-					lcdc_putchar(' ', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
-					if(++(vars.cur_setting_idx) >= sizeof(setting_list) / sizeof(ST_SETTING_UNIT))
-						vars.cur_setting_idx = 0;
-					lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
-				}
-				else{
-					// Increment value index
-					tmp_u8_p = &(vars.cur_value_idx[vars.cur_setting_idx]);
-					lcdc_putchar(' ', LCDC_WHITE, 0, (*tmp_u8_p+1)*9);
-					if(++(*tmp_u8_p) >= setting_list[vars.cur_setting_idx].nval)
-						*tmp_u8_p = 0;
-					lcdc_putchar('*', LCDC_WHITE, 0, (*tmp_u8_p+1)*9);
-				}
-			}
-
+			proc_setting(psw_spush, psw_lpush);
 		}
 
 		//// Clear flags for PSW ////
 		if((psw_spush == 1) || (psw_lpush == 1))
 			vars.psw_state = PSW_READY;
 
-
     }
 
     return 0;
+}
+
+
+
+//-------------------------------------------------------------------------------------------
+// Process for logging mode 
+//-------------------------------------------------------------------------------------------
+static void proc_logging(uint8_t spush, uint8_t lpush)
+{
+	int tmp;
+	UINT btw;
+	UINT ovrn_tmp;
+
+	if(vars.mode_init){
+		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+		lcdc_puts("Logging mode", LCDC_WHITE, 0, 0);
+		lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
+		vars.mode_init = 0;
+	}
+
+	if(vars.logging == 0){
+		// Start logging
+		if(spush){
+			tmp = 0;
+
+			tmp |= get_file_sqno("adxl345_log_*", &(vars.log_sqno));
+			tmp |= (mount_SD(&(wk.fatfs)) != FR_OK);
+
+			if(vars.log_format == LOG_FMT_CSV)
+				sprintf(wk.fname, "adxl345_log_%03d.csv", vars.log_sqno);
+			else
+				sprintf(wk.fname, "adxl345_log_%03d.bin", vars.log_sqno);
+			tmp |= (f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW) != FR_OK);
+
+			lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+			if(tmp){
+				lcdc_puts("File open failed", LCDC_WHITE, 0, 0);
+				lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
+			}
+			else{
+				sprintf(wk.fname, "Logging ... (%d)", vars.log_sqno);
+				lcdc_puts(wk.fname, LCDC_WHITE, 0, 0);
+				lcdc_puts("Short Push to stop ", LCDC_WHITE, 0, 10);
+				vars.logging = 1;
+				vars.g_buf_wp_a = 0;
+				vars.g_buf_wcnt_a = 0;
+				vars.g_buf_rp = 0;
+				vars.g_buf_rcnt = 0;
+				adxl345_start();
+			}
+		}
+		else if(lpush){
+			// Mode change
+			vars.mode = MODE_FFT;
+			vars.mode_init = 1;
+		}
+	}
+	else{
+		// Stop logging
+		if(spush){
+			adxl345_stop();
+			vars.logging = 0;
+			f_close(&(wk.fl));
+			umount_SD();
+			vars.mode_init = 1; // Return to the initial step
+		}
+		// Continue logging
+		else{
+			if(vars.g_buf_wcnt_a != vars.g_buf_rcnt){ // There are rest data to read
+				ovrn_tmp = vars.g_overrun;
+				tmp = 0;
+				if(vars.log_format == LOG_FMT_CSV){
+					tmp |= (f_printf(&(wk.fl), "%d,%d\r\n"
+						, fix_fix2int(vars.g_buf_a[vars.g_buf_rp]), vars.g_overrun) == EOF);
+				}
+				else if(vars.log_format == LOG_FMT_BIN){
+					tmp |= f_write(&(wk.fl), &(vars.g_buf_a[vars.g_buf_rp]), 4, &btw);
+					if(tmp == 0)
+						tmp |= f_write(&(wk.fl), &ovrn_tmp, 4, &btw);
+				}
+
+				if(ovrn_tmp == 1){
+					vars.g_buf_rp = vars.g_buf_wp_a;
+					vars.g_buf_rcnt = vars.g_buf_wcnt_a;
+					vars.g_overrun = 0;
+				}
+				else{
+					if(++vars.g_buf_rp >= N_GBUF) vars.g_buf_rp = 0;
+					vars.g_buf_rcnt++;
+				}
+
+				if(tmp){ // f_write() or f_printf() failed
+					adxl345_stop();
+					vars.logging = 0;
+					f_close(&(wk.fl));
+					umount_SD();
+//					lcdc_puts("File write failed", LCDC_WHITE, 0, 0);
+					sprintf(wk.fname, "File write failed:%d", tmp);
+					lcdc_puts(wk.fname, LCDC_WHITE, 0, 0);
+					lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
+
+				}
+			}
+		}
+	}
+
+}
+
+//-------------------------------------------------------------------------------------------
+// Process for FFT mode 
+//-------------------------------------------------------------------------------------------
+static void proc_FFT(uint8_t spush, uint8_t lpush)
+{
+	int i;
+
+	if(vars.mode_init){
+		adxl345_stop();
+		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+		lcdc_puts("FFT mode", LCDC_WHITE, 0, 0);
+		vars.g_buf_sel = SEL_A;
+		vars.g_buf_wp_a = 0;
+		vars.g_buf_wp_b = 0;
+		adxl345_start();
+		vars.mode_init = 0;
+	}
+
+	if(vars.g_buf_sel == SEL_A){
+		if(vars.g_buf_wp_a == N_GBUF){
+			vars.g_buf_sel = SEL_B;
+			for(i = 0; i < 512; i++)
+				vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
+			rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
+			if(vars.fft_disp_scale == 0)
+				FFT_set_scale(vars.g_buf_a);
+			lcdc_fill_area(LCDC_BLACK, 0, 127, 8, 119);
+			lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
+			lcdc_draw_curve(FFT_curve_a, 120, 1, LCDC_GREEN
+				, 0, 127, 9, 120);
+			vars.g_buf_wp_a = 0;
+		}
+	}
+	else{
+		if(vars.g_buf_wp_b == N_GBUF){
+			vars.g_buf_sel = SEL_A;
+			for(i = 0; i < 512; i++)
+				vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
+			rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
+			if(vars.fft_disp_scale == 0)
+				FFT_set_scale(vars.g_buf_b);
+			lcdc_fill_area(LCDC_BLACK, 0, 127, 8, 119);
+			lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
+			lcdc_draw_curve(FFT_curve_b, 120, 1, LCDC_GREEN
+				, 0, 127, 9, 120);
+			vars.g_buf_wp_b = 0;
+		}
+	}
+
+	if(spush){
+		lcdc_puts("Saving ...", LCDC_WHITE, 0, 0);
+		FFT_log();
+		lcdc_puts("FFT mode  ", LCDC_WHITE, 0, 0);
+	}
+	else if(lpush){
+		// Mode change
+		vars.mode = MODE_METER;
+		vars.mode_init = 1;
+	}
+
+}
+
+//-------------------------------------------------------------------------------------------
+// Process for meter mode 
+//-------------------------------------------------------------------------------------------
+static void proc_meter(uint8_t spush, uint8_t lpush)
+{
+	if(vars.mode_init){
+		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
+		lcdc_puts("METER mode", LCDC_WHITE, 0, 0);
+		vars.mode_init = 0;
+	}
+
+	// Mode change
+	if(lpush){
+		vars.mode = MODE_SETTING;
+		vars.mode_init = 1;
+	}
+}
+
+//-------------------------------------------------------------------------------------------
+// Process for setting mode 
+//-------------------------------------------------------------------------------------------
+static void proc_setting(uint8_t spush, uint8_t lpush)
+{
+	int i;
+	uint8_t u8_tmp;
+	uint8_t *u8_tmp_p;
+	unsigned int tmp;
+
+	if(vars.mode_init || (lpush && (vars.setting_state == STG_ST_VAL))){
+		// Show mode name
+		if(vars.mode_init){
+			lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, 8);
+			lcdc_puts("SETTING mode", LCDC_WHITE, 0, 0);
+			vars.mode_init = 0;
+		}
+		// Show setting list
+		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
+		for(i = 0; i < (sizeof(setting_list)/sizeof(ST_SETTING_UNIT)); i++){
+			lcdc_puts(setting_list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
+		}
+		// Selection mark
+		lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+		vars.setting_state = STG_ST_STG;
+	}
+	else if(lpush && (vars.setting_state == STG_ST_STG)){
+		// "exit" menu -> Apply setting values and go to next mode
+		if(strcmp(setting_list[vars.cur_setting_idx].name, "exit") == 0){
+			u8_tmp = (uint8_t)(setting_list[STG_AXIS].list[vars.cur_value_idx[STG_AXIS]].val);
+			vars.axis_sel = u8_tmp;
+			vars.log_format = setting_list[STG_LOGFMT].list[vars.cur_value_idx[STG_LOGFMT]].val;
+			u8_tmp = (uint8_t)(setting_list[STG_RATE].list[vars.cur_value_idx[STG_RATE]].val);
+			ADXL345_set_rate(u8_tmp);
+			u8_tmp = (uint8_t)(setting_list[STG_RANGE].list[vars.cur_value_idx[STG_RANGE]].val);
+			ADXL345_set_range(u8_tmp);
+			tmp = setting_list[STG_FFTSCALE].list[vars.cur_value_idx[STG_FFTSCALE]].val;
+			vars.fft_disp_scale = tmp;
+
+			vars.cur_setting_idx = STG_AXIS;
+			vars.mode = MODE_LOGGING;
+			vars.mode_init = 1;
+		}
+		// Other menu -> Show value list
+		else{
+			lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 9, LCDC_COL-1);
+			for(i = 0; i < setting_list[vars.cur_setting_idx].nval; i++){
+				lcdc_puts(setting_list[vars.cur_setting_idx].list[i].name, LCDC_WHITE, 6, (i+1)*9); // Add one character space on top for selection mark
+			}
+			// Selection mark
+			lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_value_idx[vars.cur_setting_idx]+1)*9);
+			vars.setting_state = STG_ST_VAL;
+		}
+
+	}
+
+	if(spush){
+		if(vars.setting_state == STG_ST_STG){
+			// Increment setting index
+			lcdc_putchar(' ', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+			if(++(vars.cur_setting_idx) >= sizeof(setting_list) / sizeof(ST_SETTING_UNIT))
+				vars.cur_setting_idx = 0;
+			lcdc_putchar('*', LCDC_WHITE, 0, (vars.cur_setting_idx+1)*9);
+		}
+		else{
+			// Increment value index
+			u8_tmp_p = &(vars.cur_value_idx[vars.cur_setting_idx]);
+			lcdc_putchar(' ', LCDC_WHITE, 0, (*u8_tmp_p+1)*9);
+			if(++(*u8_tmp_p) >= setting_list[vars.cur_setting_idx].nval)
+				*u8_tmp_p = 0;
+			lcdc_putchar('*', LCDC_WHITE, 0, (*u8_tmp_p+1)*9);
+		}
+	}
+
 }
 
 

@@ -129,7 +129,9 @@ void lcdc_draw_pixel(_UWORD color, _UWORD x0, _UWORD y0);
 
 // _SWORD curve(_UWORD) : curve function
 // sweep x direction
-void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _UWORD color, _UWORD x_start, _UWORD x_end, _UWORD y_start, _UWORD y_end);
+// dir : Y axis direction, 0 -> from y_start to y_end , 1 -> from y_end to y_start
+void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _SWORD dir, _UWORD color
+				, _UWORD x_start, _UWORD x_end, _UWORD y_start, _UWORD y_end);
 
 void lcdc_putchar(char c, _UWORD color, _UWORD x0, _UWORD y0);
 void lcdc_puts(char *s, _UWORD color, _UWORD x0, _UWORD y0);
