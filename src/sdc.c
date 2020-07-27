@@ -68,6 +68,8 @@ static void DEVICE_BAUD_SET_LOW()
 #define DAT_RESP_CRC_ERR 0x0B//0b00001011
 #define DAT_RESP_WRITE_ERR 0x0D//0b00001101
 
+// Timeout count value for command response
+#define BUSY_TIMEOUT_COUNT 1000
 
 static bool sdc_v2; // V2.00 or later ?
 static bool sdc_hc; // High Capacity ? (or Standard Capacity)
@@ -699,35 +701,35 @@ static bool wait_response(uint8_t *resp1)
 {
 	int i;
 
-	for(i = 0; i < 1000; i++){
+	for(i = 0; i < BUSY_TIMEOUT_COUNT; i++){
 		*resp1 = DEVICE_SPI_TRANSCEIVE(0xFF);
 		if(*resp1 != 0xff) break;
 
-//		timer_soft_wait(1);
+		timer_soft_wait(1);
 	}
 
 #if SDC_DEBUG_PRINT
 	printf("wait count : %d\r\n", i);
 #endif
 
-	return (i != 1000);
+	return (i != BUSY_TIMEOUT_COUNT);
 }
 
 static bool wait_busy()
 {
 	int i;
 
-	for(i = 0; i < 1000; i++){
+	for(i = 0; i < BUSY_TIMEOUT_COUNT; i++){
 
 		if(DEVICE_SPI_TRANSCEIVE(0xFF) != 0x00)
 			break;
 
-//		timer_soft_wait(1);
+		timer_soft_wait(1);
 	}
 #if SDC_DEBUG_PRINT
 	printf("busy count : %d\r\n", i);
 #endif
-	return (i != 1000);
+	return (i != BUSY_TIMEOUT_COUNT);
 }
 
 

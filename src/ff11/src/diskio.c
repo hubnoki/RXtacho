@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include "../../sdc.h"
+#include "../../uart.h"
 
 /* Definitions of physical drive number for each drive */
 #define ATA		0	/* Example: Map ATA harddisk to physical drive 0 */
@@ -142,6 +143,7 @@ DRESULT disk_write (
 	DRESULT res;
 //	int result;
 	SDC_RW_RESULT sdc_res;
+	char s[20];
 
 	switch (pdrv) {
 	case SD1 :
@@ -151,8 +153,12 @@ DRESULT disk_write (
 		else
 			sdc_res = sdc_MultiBlockWrite(buff, sector, count);
 
-		if(sdc_res.result != 0)
+		if(sdc_res.result != 0){
 			res = RES_ERROR;
+			// uart_puts("disk_write error:");
+			// sprintf(s, "%08x(multi?%c)\r\n", sdc_res, (count != 1) ? 'Y' : 'N');
+			// uart_puts(s);
+		}
 		else
 			res = RES_OK;
 
