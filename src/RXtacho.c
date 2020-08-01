@@ -661,11 +661,14 @@ int main(void)
 //-------------------------------------------------------------------------------------------
 // Process for logging mode 
 //-------------------------------------------------------------------------------------------
+static unsigned long tm, tmax; // For measuring process time
+
 static void proc_logging(uint8_t spush, uint8_t lpush)
 {
 	int tmp;
 	UINT btw;
 	UINT ovrn_tmp;
+	unsigned long td;
 
 	if(vars.mode_init){
 		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
@@ -704,6 +707,9 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 				vars.g_buf_rcnt = 0;
 				adxl345_start();
 			}
+
+			timer_soft_reset(&tm);
+			tmax = 0;
 		}
 		else if(lpush){
 			// Mode change
@@ -718,10 +724,18 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 			vars.logging = 0;
 			f_close(&(wk.fl));
 			umount_SD();
+
+			PRINTF("Max process interval : %d\r\n", tmax);
+
 			vars.mode_init = 1; // Return to the initial step
 		}
 		// Continue logging
 		else{
+			td = timer_soft_count(&tm);
+			timer_soft_reset(&tm);
+			if(td > tmax)
+				tmax = td;
+
 			if(vars.g_buf_wcnt_a != vars.g_buf_rcnt){ // There are rest data to read
 				ovrn_tmp = vars.g_overrun;
 				tmp = 0;
@@ -853,6 +867,11 @@ static void proc_setting(uint8_t spush, uint8_t lpush)
 	unsigned int tmp;
 
 	if(vars.mode_init || (lpush && (vars.setting_state == STG_ST_VAL))){
+		/*
+		 * Just have entered into setting mode
+		 * , or long push to return from value setting state to item selection state.
+		 */
+
 		// Show mode name
 		if(vars.mode_init){
 			lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, 8);
@@ -869,6 +888,10 @@ static void proc_setting(uint8_t spush, uint8_t lpush)
 		vars.setting_state = STG_ST_STG;
 	}
 	else if(lpush && (vars.setting_state == STG_ST_STG)){
+		/*
+		 * Long push to go into value setting state
+		 */
+
 		// "exit" menu -> Apply setting values and go to next mode
 		if(strcmp(setting_list[vars.cur_setting_idx].name, "exit") == 0){
 			u8_tmp = (uint8_t)(setting_list[STG_AXIS].list[vars.cur_value_idx[STG_AXIS]].val);
