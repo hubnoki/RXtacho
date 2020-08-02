@@ -190,6 +190,13 @@ static const ST_SETTING_UNIT setting_list[] = {
 
 //---------------------
 
+typedef struct{
+	signed short g;
+	uint16_t flags;
+} LOG_UNIT;
+
+#define N_LOGBUF (2*sizeof(FIX_T)*N_GBUF / sizeof(LOG_UNIT))
+
 static struct{
 	uint8_t 		mode;
 	uint8_t			mode_init;
@@ -199,7 +206,14 @@ static struct{
 	uint8_t			psw_state;
 	unsigned long	psw_tm;
 
-	FIX_T			g_buf_a[N_GBUF], g_buf_b[N_GBUF];
+	union{
+		LOG_UNIT g_buf[N_LOGBUF];
+		struct{
+			FIX_T g_buf_a[N_GBUF];
+			FIX_T g_buf_b[N_GBUF];
+		};
+	};
+
 	uint8_t 		g_buf_sel; // Buffer side to save G sensor data
 	uint16_t 		g_buf_wp_a;
 	uint16_t 		g_buf_wp_b;
@@ -233,37 +247,34 @@ void adxl345_int_routine()
 {
 	signed short d[3];
 	FIX_T f;
-
-	// Overrun flag for logging mode
-	if(vars.mode == MODE_LOGGING)
-		// vars.g_overrun = (vars.g_buf_wp_a == vars.g_buf_rp);
-		vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_GBUF-1;
+	LOG_UNIT log_d;
 
 	ADXL345_get(d);
-	switch(vars.axis_sel){
-		case AXIS_X : f = fix_int2fix((int)d[0]); break;
-		case AXIS_Y : f = fix_int2fix((int)d[1]); break;
-		case AXIS_Z : f = fix_int2fix((int)d[2]); break;
-		default : f = 0; break;		
-	}
 
 	// Put data into buffer
 	if(vars.logging){
-		vars.g_buf_a[vars.g_buf_wp_a] = f;
-		if(++vars.g_buf_wp_a >= N_GBUF)
+
+		log_d.g = d[vars.axis_sel];
+		// Flags
+		// 	overrun - Overrun occurred, overwriting data which are not read
+		log_d.flags = (vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_LOGBUF-1);
+
+		vars.g_buf[vars.g_buf_wp_a] = log_d;
+
+		if(++vars.g_buf_wp_a >= N_LOGBUF)
 			vars.g_buf_wp_a = 0;
 		vars.g_buf_wcnt_a++;
 	}
 	else{
 		if(vars.g_buf_sel == SEL_A){
 			if(vars.g_buf_wp_a < N_GBUF){
-				vars.g_buf_a[vars.g_buf_wp_a] = f;
+				vars.g_buf_a[vars.g_buf_wp_a] = fix_int2fix((int)d[vars.axis_sel]);
 				vars.g_buf_wp_a++;
 			}
 		}
 		else{
 			if(vars.g_buf_wp_b < N_GBUF){
-				vars.g_buf_b[vars.g_buf_wp_b] = f;
+				vars.g_buf_b[vars.g_buf_wp_b] = fix_int2fix((int)d[vars.axis_sel]);;
 				vars.g_buf_wp_b++;
 			}
 		}
@@ -665,9 +676,9 @@ static unsigned long tm, tmax; // For measuring process time
 
 static void proc_logging(uint8_t spush, uint8_t lpush)
 {
-	int tmp;
+	int fres;
 	UINT btw;
-	UINT ovrn_tmp;
+	UINT ovrn;
 	unsigned long td;
 
 	if(vars.mode_init){
@@ -680,19 +691,19 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 	if(vars.logging == 0){
 		// Start logging
 		if(spush){
-			tmp = 0;
+			fres = 0;
 
-			tmp |= get_file_sqno("adxl345_log_*", &(vars.log_sqno));
-			tmp |= (mount_SD(&(wk.fatfs)) != FR_OK);
+			fres |= get_file_sqno("adxl345_log_*", &(vars.log_sqno));
+			fres |= (mount_SD(&(wk.fatfs)) != FR_OK);
 
 			if(vars.log_format == LOG_FMT_CSV)
 				sprintf(wk.fname, "adxl345_log_%03d.csv", vars.log_sqno);
 			else
 				sprintf(wk.fname, "adxl345_log_%03d.bin", vars.log_sqno);
-			tmp |= (f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW) != FR_OK);
+			fres |= (f_open(&(wk.fl), wk.fname, FA_WRITE | FA_CREATE_NEW) != FR_OK);
 
 			lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
-			if(tmp){
+			if(fres){
 				lcdc_puts("File open failed", LCDC_WHITE, 0, 0);
 				lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
 			}
@@ -737,35 +748,34 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 				tmax = td;
 
 			if(vars.g_buf_wcnt_a != vars.g_buf_rcnt){ // There are rest data to read
-				ovrn_tmp = vars.g_overrun;
-				tmp = 0;
+				ovrn = vars.g_overrun;
 				if(vars.log_format == LOG_FMT_CSV){
-					tmp |= (f_printf(&(wk.fl), "%d,%d\r\n"
-						, fix_fix2int(vars.g_buf_a[vars.g_buf_rp]), vars.g_overrun) == EOF);
+					fres = (
+							f_printf(&(wk.fl), "%d,%d\r\n"
+							, vars.g_buf[vars.g_buf_rp].g, vars.g_buf[vars.g_buf_rp].flags)
+						== EOF);
 				}
 				else if(vars.log_format == LOG_FMT_BIN){
-					tmp |= f_write(&(wk.fl), &(vars.g_buf_a[vars.g_buf_rp]), 4, &btw);
-					if(tmp == 0)
-						tmp |= f_write(&(wk.fl), &ovrn_tmp, 4, &btw);
+					fres = f_write(&(wk.fl), &(vars.g_buf[vars.g_buf_rp]), sizeof(LOG_UNIT), &btw);
 				}
 
-				if(ovrn_tmp == 1){
+				if(ovrn == 1){
 					vars.g_buf_rp = vars.g_buf_wp_a;
 					vars.g_buf_rcnt = vars.g_buf_wcnt_a;
 					vars.g_overrun = 0;
 				}
 				else{
-					if(++vars.g_buf_rp >= N_GBUF) vars.g_buf_rp = 0;
+					if(++vars.g_buf_rp >= N_LOGBUF) vars.g_buf_rp = 0;
 					vars.g_buf_rcnt++;
 				}
 
-				if(tmp){ // f_write() or f_printf() failed
+				if(fres){ // f_write() or f_printf() failed
 					adxl345_stop();
 					vars.logging = 0;
 					f_close(&(wk.fl));
 					umount_SD();
 //					lcdc_puts("File write failed", LCDC_WHITE, 0, 0);
-					sprintf(wk.fname, "File write failed:%d", tmp);
+					sprintf(wk.fname, "File write failed:%d", fres);
 					lcdc_puts(wk.fname, LCDC_WHITE, 0, 0);
 					lcdc_puts("Short push to start", LCDC_WHITE, 0, 10);
 

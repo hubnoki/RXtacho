@@ -495,4 +495,51 @@
 	・	プッシュスイッチについて
 		メインルーチン内で処理したら次の受付ができるようにしたが、動作検証は不十分
 
+20.08.01
+	・	vars構造体に動作状態の変数を色々と入れているが、構造体化していることによるパフォーマンス的なデメリットがないかどうか、
+		アセンブラ(RXtacho.lst)を見て確認した
+		結果的には、デメリットはないようだった
+
+		-------------------------------------
+		**** 構造体化している場合 ****
+ 254:../src/RXtacho.c **** 		vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_LOGBUF-1;
+ 858                             		.loc 2 254 0
+ 859 0075 FB 52 00 00 00 00       		mov.L	#_vars, r5
+ 860 007b DE 55 1B 08             		mov.W	4150[r5], r5
+ 861 007f 5F 54                   		movu.W	r5, r4
+ 862 0081 FB 52 00 00 00 00       		mov.L	#_vars, r5
+ 863 0087 DE 55 1D 08             		mov.W	4154[r5], r5
+ 864 008b 5F 55                   		movu.W	r5, r5
+ 865 008d FF 05 54                		sub	r5, r4, r5
+ 866 0090 76 05 FE 03             		cmp	#0x3fe, r5
+ 867 0094 FC DB 54                		scgtu.L	r5
+ 868 0097 CF 54                   		mov.B	r5, r4
+ 869 0099 FB 52 00 00 00 00       		mov.L	#_vars, r5
+ 870 009f CB 54 3C 10             		mov.B	r4, 4156[r5]
+
+		**** 構造体化していない場合(wcnt, rcnt変数を別途宣言) ****
+ 258:../src/RXtacho.c **** 		// vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_LOGBUF-1;
+ 259:../src/RXtacho.c **** 		vars.g_overrun = (wcnt - rcnt) >= N_LOGBUF-1;
+ 881                             		.loc 2 259 0
+ 882 0099 FB 52 00 00 00 00       		mov.L	#_wcnt, r5
+ 883 009f DC 55                   		mov.W	[r5], r5
+ 884 00a1 5F 54                   		movu.W	r5, r4
+ 885 00a3 FB 52 00 00 00 00       		mov.L	#_rcnt, r5
+ 886 00a9 DC 55                   		mov.W	[r5], r5
+ 887 00ab 5F 55                   		movu.W	r5, r5
+ 888 00ad FF 05 54                		sub	r5, r4, r5
+ 889 00b0 76 05 FE 03             		cmp	#0x3fe, r5
+ 890 00b4 FC DB 54                		scgtu.L	r5
+ 891 00b7 CF 54                   		mov.B	r5, r4
+ 892 00b9 FB 52 00 00 00 00       		mov.L	#_vars, r5
+ 893 00bf CB 54 3C 10             		mov.B	r4, 4156[r5]
+
+		-------------------------------------
+
+		いずれも一旦変数(static変数)のアドレスをCPUレジスタに取ってきて、
+		そこから所定アドレス進めた場所のデータをCPUレジスタに取ってきている
+
+
+
+
 					
