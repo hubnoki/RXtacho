@@ -676,10 +676,11 @@ static unsigned long tm, tmax; // For measuring process time
 
 static void proc_logging(uint8_t spush, uint8_t lpush)
 {
-	int fres;
+	int fres = 0;
 	UINT btw;
 	UINT ovrn;
 	unsigned long td;
+	unsigned int tmp;
 
 	if(vars.mode_init){
 		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
@@ -711,6 +712,34 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 				sprintf(wk.fname, "Logging ... (%d)", vars.log_sqno);
 				lcdc_puts(wk.fname, LCDC_WHITE, 0, 0);
 				lcdc_puts("Short Push to stop ", LCDC_WHITE, 0, 10);
+
+				// Log file header
+				if(vars.log_format == LOG_FMT_CSV){
+					fres = (
+						f_printf(&(wk.fl), "rate:%d, range:%d\r\n"
+							, value_list_rate[vars.cur_value_idx[STG_RATE]].val
+							, value_list_range[vars.cur_value_idx[STG_RANGE]].val
+						)
+					== EOF);
+				}
+				else{
+					// Header identifier
+					tmp = 'LOGH';
+					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+					// Header version
+					tmp = 1;
+					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+					// Header contents size (in bytes)
+					tmp = 8;
+					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+					// Header contents
+					// Rate setting
+					tmp = value_list_rate[vars.cur_value_idx[STG_RATE]].val;
+					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+					// Range setting
+					tmp = value_list_range[vars.cur_value_idx[STG_RANGE]].val;
+					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+				}
 				vars.logging = 1;
 				vars.g_buf_wp_a = 0;
 				vars.g_buf_wcnt_a = 0;
