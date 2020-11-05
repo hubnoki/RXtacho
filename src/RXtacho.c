@@ -71,6 +71,8 @@ extern "C" void __main()
 //-------------------------------------------------------------------------------------------
 // Local variables
 
+#define DISP_INT_INTVL 0
+
 #define RX_BUF_N 100
 static char rx_buf[RX_BUF_N];
 
@@ -222,6 +224,10 @@ static struct{
 	uint16_t		g_buf_rcnt; // For logging mode
 	uint8_t 		g_overrun;
 
+	uint16_t		g_int_intvl;
+	uint16_t		g_int_cnt_last;
+	uint8_t			g_int_update;
+
 	uint8_t 		logging;
 	int				log_sqno; // Sequential number for log file
 	int				log_format;
@@ -248,6 +254,13 @@ void adxl345_int_routine()
 	signed short d[3];
 	FIX_T f;
 	LOG_UNIT log_d;
+	uint16_t int_cnt = ADXL345_INT_CNTR;
+
+	if(vars.g_int_update == 0){
+		vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
+		vars.g_int_update = 1;
+	}
+	vars.g_int_cnt_last = int_cnt;
 
 	ADXL345_get(d);
 
@@ -559,6 +572,8 @@ int main(void)
 	vars.g_overrun = 0;
 	vars.logging = 0;
 
+	vars.g_int_update = 0;
+
 	vars.fft_disp_scale_auto = 0;
 
 	vars.setting_state = STG_ST_STG;
@@ -617,6 +632,12 @@ int main(void)
 	PRINTF(commandline_header);
 	
     while (1) {
+
+		// Display ADXL345 interrupt interval
+		if(vars.g_int_update == 1){
+			PRINTF("%8d\r\n", vars.g_int_intvl);
+			vars.g_int_update = 0;
+		}
 
 		//// Serial commands ////
 		if(uart_kbhit_s()){
@@ -871,6 +892,7 @@ static void proc_FFT(uint8_t spush, uint8_t lpush)
 	}
 	else if(lpush){
 		// Mode change
+		adxl345_stop();
 		vars.mode = MODE_METER;
 		vars.mode_init = 1;
 	}

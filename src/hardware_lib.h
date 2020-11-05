@@ -113,6 +113,8 @@ void adxl345int1_int_enable();
 void adxl345int1_int_disable();
 void adxl345int1_int_set_callback(void (*cb)(void));
 
+#define ADXL345_INT_CNTR CMT1.CMCNT
+
 
 
 //------------------------------------------------------------------------
