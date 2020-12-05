@@ -192,9 +192,20 @@ static const ST_SETTING_UNIT setting_list[] = {
 
 //---------------------
 
+// Flags of log data
+// 	flags.bit0    overrun - Overrun occurred, overwriting data which are not read
+//  flags.bit1    measureIntCnt - Data contains measurement interval count
+typedef union{
+	struct{
+		uint8_t overrun : 1;
+		uint8_t measureIntCnt : 1;
+	};
+	uint16_t wd;
+} LOG_FLAGS;
+
 typedef struct{
-	signed short g;
-	uint16_t flags;
+	signed short d;
+	LOG_FLAGS flags;
 } LOG_UNIT;
 
 #define N_LOGBUF (2*sizeof(FIX_T)*N_GBUF / sizeof(LOG_UNIT))
@@ -223,6 +234,7 @@ static struct{
 	uint16_t 		g_buf_rp;
 	uint16_t		g_buf_rcnt; // For logging mode
 	uint8_t 		g_overrun;
+	uint8_t			g_buf_filled; // All elements of the buffer are filled with valid data
 
 	uint16_t		g_int_intvl;
 	uint16_t		g_int_cnt_last;
@@ -256,26 +268,33 @@ void adxl345_int_routine()
 	LOG_UNIT log_d;
 	uint16_t int_cnt = ADXL345_INT_CNTR;
 
-	if(vars.g_int_update == 0){
-		vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
-		vars.g_int_update = 1;
-	}
-	vars.g_int_cnt_last = int_cnt;
+	// if(vars.g_int_update == 0){
+	// 	vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
+	// 	vars.g_int_update = 1;
+	// }
+	// vars.g_int_cnt_last = int_cnt;
 
 	ADXL345_get(d);
 
 	// Put data into buffer
 	if(vars.logging){
 
-		log_d.g = d[vars.axis_sel];
-		// Flags
-		// 	overrun - Overrun occurred, overwriting data which are not read
-		log_d.flags = (vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_LOGBUF-1);
+		if(vars.g_buf_wp_a == 0){
+			// Measure the interval to fill the buffer
+			vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
+			vars.g_int_cnt_last = int_cnt;
+		}
+
+		log_d.d = d[vars.axis_sel];
+		log_d.flags.wd = 0;
+		log_d.flags.overrun = (vars.g_overrun = (vars.g_buf_wcnt_a - vars.g_buf_rcnt) >= N_LOGBUF-1);
 
 		vars.g_buf[vars.g_buf_wp_a] = log_d;
 
-		if(++vars.g_buf_wp_a >= N_LOGBUF)
+		if(++vars.g_buf_wp_a >= N_LOGBUF){
 			vars.g_buf_wp_a = 0;
+			vars.g_buf_filled = 1;
+		}
 		vars.g_buf_wcnt_a++;
 	}
 	else{
@@ -570,6 +589,7 @@ int main(void)
 	vars.g_buf_wp_b = 0;
 	vars.g_buf_rp = 0;
 	vars.g_overrun = 0;
+	vars.g_buf_filled = 0;
 	vars.logging = 0;
 
 	vars.g_int_update = 0;
@@ -695,13 +715,42 @@ int main(void)
 //-------------------------------------------------------------------------------------------
 static unsigned long tm, tmax; // For measuring process time
 
+#include "iodefine.h"
+
+static FRESULT write_log_header_bin(FIL *f)
+{
+	FRESULT fres = 0;
+	unsigned int tmp;
+	unsigned int btw;
+
+	// Header identifier
+	tmp = 'LOGH';
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+	// Header version
+	tmp = 2;
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+	// Header contents size (in bytes)
+	tmp = 12;
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+	//// Header contents ////
+	// Rate setting
+	tmp = value_list_rate[vars.cur_value_idx[STG_RATE]].val;
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+	// Range setting
+	tmp = value_list_range[vars.cur_value_idx[STG_RANGE]].val;
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+	// Time measurement interval
+	tmp = (N_LOGBUF & 0xFFFF) | (CMT1.CMCR.BIT.CKS << 16);
+	fres |= f_write(f, &tmp, sizeof(int), &btw);
+
+	return fres;
+}
+
 static void proc_logging(uint8_t spush, uint8_t lpush)
 {
 	int fres = 0;
-	UINT btw;
-	UINT ovrn;
+	unsigned int btw;
 	unsigned long td;
-	unsigned int tmp;
 
 	if(vars.mode_init){
 		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
@@ -744,28 +793,14 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 					== EOF);
 				}
 				else{
-					// Header identifier
-					tmp = 'LOGH';
-					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
-					// Header version
-					tmp = 1;
-					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
-					// Header contents size (in bytes)
-					tmp = 8;
-					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
-					// Header contents
-					// Rate setting
-					tmp = value_list_rate[vars.cur_value_idx[STG_RATE]].val;
-					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
-					// Range setting
-					tmp = value_list_range[vars.cur_value_idx[STG_RANGE]].val;
-					fres |= f_write(&(wk.fl), &tmp, sizeof(int), &btw);
+					fres = write_log_header_bin(&(wk.fl));
 				}
 				vars.logging = 1;
 				vars.g_buf_wp_a = 0;
 				vars.g_buf_wcnt_a = 0;
 				vars.g_buf_rp = 0;
 				vars.g_buf_rcnt = 0;
+				vars.g_buf_filled = 0;
 				adxl345_start();
 			}
 
@@ -797,16 +832,27 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 			if(td > tmax)
 				tmax = td;
 
-			if(vars.g_buf_wcnt_a != vars.g_buf_rcnt){ // There are rest data to read
-				ovrn = vars.g_overrun;
+			if(vars.g_buf_wcnt_a != vars.g_buf_rcnt){ // There remains unread data
+				unsigned int tmp = 0;
+				LOG_UNIT logData = vars.g_buf[vars.g_buf_rp];
+				unsigned int ovrn = vars.g_overrun;
+
 				if(vars.log_format == LOG_FMT_CSV){
 					fres = (
 							f_printf(&(wk.fl), "%d,%d\r\n"
-							, vars.g_buf[vars.g_buf_rp].g, vars.g_buf[vars.g_buf_rp].flags)
+							, logData.d, logData.flags.wd)
 						== EOF);
 				}
 				else if(vars.log_format == LOG_FMT_BIN){
-					fres = f_write(&(wk.fl), &(vars.g_buf[vars.g_buf_rp]), sizeof(LOG_UNIT), &btw);
+					fres |= f_write(&(wk.fl), &logData, sizeof(LOG_UNIT), &btw);
+
+					// Write measure interval count after g data
+					if((vars.g_buf_rp == 0) && vars.g_buf_filled){
+						logData.d = vars.g_int_intvl;
+						logData.flags.measureIntCnt = 1;
+						fres |= f_write(&(wk.fl), &logData, sizeof(unsigned int), &btw);
+					}
+
 				}
 
 				if(ovrn == 1){

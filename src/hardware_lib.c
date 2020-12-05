@@ -112,7 +112,8 @@ void rx220_init_setup()
 	CMT.CMSTR0.BIT.STR0 = 1; // CMT0 count start
 
 	//// 16bit freerun counter (CMT1) setting ////
-	CMT1.CMCR.BIT.CKS = 0x0;	// count source : PCLK / 8
+	// CMT1.CMCR.BIT.CKS = 0x0;	// count source : PCLK / 8
+	CMT1.CMCR.BIT.CKS = 0x3;	// count source : PCLK / 512
 	CMT1.CMCR.BIT.CMIE = 0;		// interrupt disable
 	CMT1.CMCOR = 0xFFFF; 		// 16bit freerun counter
 
