@@ -14,14 +14,21 @@
 #ifndef FONT_H_
 #define FONT_H_
 
+#define W_FONT 5
+
 typedef struct{
-	unsigned char f[5];
+	unsigned char f[W_FONT];
 }FONT_DATA;
 
 extern const FONT_DATA font[];
 
-////extern const unsigned char font[][5];
-//extern unsigned char font[][5];
+#define W_FONT_X4 20
+
+typedef struct{
+	unsigned int f[W_FONT_X4];
+}FONT_DATA_X4;
+
+extern const FONT_DATA_X4 font_x4[];
 
 
 #endif /* FONT_H_ */

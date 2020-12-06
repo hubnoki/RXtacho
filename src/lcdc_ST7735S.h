@@ -136,6 +136,9 @@ void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _SWORD dir, _UWORD 
 void lcdc_putchar(char c, _UWORD color, _UWORD x0, _UWORD y0);
 void lcdc_puts(char *s, _UWORD color, _UWORD x0, _UWORD y0);
 
+void lcdc_putchar_x4(char c, _UWORD color, _UWORD x0, _UWORD y0);
+void lcdc_puts_x4(char *s, _UWORD color, _UWORD x0, _UWORD y0);
+
 
 #ifdef ST7735S_REG_ACCESS
 

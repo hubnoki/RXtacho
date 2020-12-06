@@ -161,6 +161,7 @@ static void test_lcd_rx();
 static void test_lcd_area();
 static void test_lcd_putc();
 static void test_lcd_puts();
+static void test_lcd_puts_x4();
 
 static void test_lcd_rinv();
 static void test_lcd_cinv();
@@ -235,6 +236,7 @@ const COMMANDLINE_SET commandline_sets[] = {
 		, {"lcd_fill", 	test_lcd_fill}
 		, {"lcd_putc",	test_lcd_putc}
 		, {"lcd_puts",	test_lcd_puts}
+		, {"lcd_puts_x4",	test_lcd_puts_x4}
 		, {"lcd_rinv",	test_lcd_rinv}
 		, {"lcd_cinv",	test_lcd_cinv}
 		, {"lcd_ainv",	test_lcd_ainv}
@@ -1455,6 +1457,15 @@ static void test_lcd_puts()
 	gets_pol(s);
 
 	lcdc_puts(s, LCDC_WHITE, 0,0);
+}
+
+static void test_lcd_puts_x4()
+{
+	char s[100];
+	printf("string to display : \r\n");
+	gets_pol(s);
+
+	lcdc_puts_x4(s, LCDC_WHITE, 0,0);
 }
 
 static void test_lcd_rinv()

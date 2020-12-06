@@ -496,7 +496,7 @@ void lcdc_draw_curve(_SWORD (*curve)(_UWORD), _SWORD offset, _SWORD dir, _UWORD 
 static void lcdc_draw_8x(const unsigned char *bit_ptn, _UWORD color, _UWORD x0, _UWORD y0, _UWORD dy)
 {
 	int i, j;
-	unsigned char index, tmp;
+	unsigned char tmp;
 
 
 	lcdc_set_area(x0, x0 + 7, y0, y0 + dy-1);
@@ -535,7 +535,7 @@ static void lcdc_draw_8x(const unsigned char *bit_ptn, _UWORD color, _UWORD x0, 
 void lcdc_putchar(char c, _UWORD color, _UWORD x0, _UWORD y0)
 {
 	int i, j;
-	unsigned char index, tmp;
+	unsigned char index;
 	
 	if( (c < 0x20) || (c > 0x7F) )
 		index = 0x20;
@@ -544,7 +544,7 @@ void lcdc_putchar(char c, _UWORD color, _UWORD x0, _UWORD y0)
 		
 	lcdc_row_col_exchange();
 
-	lcdc_draw_8x(font[index].f, color, y0, x0, 5);
+	lcdc_draw_8x(font[index].f, color, y0, x0, W_FONT);
 
 	lcdc_row_col_exchange();
 }
@@ -562,7 +562,7 @@ void lcdc_puts(char *s, _UWORD color, _UWORD x0, _UWORD y0)
 	y_tmp = y0;
 
 	while(*p != '\0'){
-		if(x_tmp > LCDC_X_WIDTH - 5){
+		if(x_tmp > LCDC_X_WIDTH - W_FONT){
 			// If there is not enough space for x direction,
 			// rewind x position, and increment y position.
 			x_tmp = x0;
@@ -573,13 +573,106 @@ void lcdc_puts(char *s, _UWORD color, _UWORD x0, _UWORD y0)
 		else{
 			lcdc_putchar(*p, color, x_tmp, y_tmp);
 			p++;
-			x_tmp += (5 + HORIZONTAL_PITCH);
+			x_tmp += (W_FONT + HORIZONTAL_PITCH);
 		}
 	}
 
 }
 
 
+//-------------------------------------------------
+// 4x font functions
+//-------------------------------------------------
+
+// bit_ptn[j].bit(b) : (j)th y, (b)th x
+// display area : rectangle of (x0, y0), (x0 + 31, y0 + dy - 1)
+static void lcdc_draw_32x(const unsigned int *bit_ptn, _UWORD color, _UWORD x0, _UWORD y0, _UWORD dy)
+{
+	int i, j;
+	unsigned int tmp;
+
+
+	lcdc_set_area(x0, x0 + 31, y0, y0 + dy-1);
+
+	write_command(0x2C);
+
+	DEVICE_RS_SET();
+	DEVICE_CS_CLEAR();
+
+	for(j = 0; j < dy; j++){			// Row loop
+
+		tmp = bit_ptn[j];
+
+		for(i = 0; i < 32; i++){	// Column loop
+
+			if( tmp & 0x01 ){
+				DEVICE_SPI_TX_BUFW( (_UBYTE)(color >> 8) );
+				DEVICE_SPI_TX_BUFW( (_UBYTE)color );
+			}
+			else{
+				DEVICE_SPI_TX_BUFW(0x0);
+				DEVICE_SPI_TX_BUFW(0x0);
+			}
+
+			tmp >>= 1;
+		}
+	}
+
+	while(!DEVICE_SPI_TX_END)
+		;
+	DEVICE_CS_SET();
+
+}
+
+
+void lcdc_putchar_x4(char c, _UWORD color, _UWORD x0, _UWORD y0)
+{
+	int i, j;
+	unsigned char index;
+	
+	if( (c < 0x20) || (c > 0x7F) )
+		index = 0x20;
+	else
+		index = c - 0x20;
+		
+	lcdc_row_col_exchange();
+
+	lcdc_draw_32x(font_x4[index].f, color, y0, x0, W_FONT_X4);
+
+	lcdc_row_col_exchange();
+}
+
+void lcdc_puts_x4(char *s, _UWORD color, _UWORD x0, _UWORD y0)
+{
+	_UWORD x_tmp, y_tmp;
+	char *p;
+
+	p = s;
+
+	x_tmp = x0;
+	y_tmp = y0;
+
+	while(*p != '\0'){
+		if(x_tmp > LCDC_X_WIDTH - W_FONT_X4){
+			// If there is not enough space for x direction,
+			// rewind x position, and increment y position.
+			x_tmp = x0;
+			y_tmp += 32 + VERTICAL_PITCH;
+			if(y_tmp >= LCDC_Y_WIDTH)
+				break;
+		}
+		else{
+			lcdc_putchar_x4(*p, color, x_tmp, y_tmp);
+			p++;
+			x_tmp += (W_FONT_X4 + HORIZONTAL_PITCH);
+		}
+	}
+
+}
+
+
+
+//-------------------------------------------------
 
 #ifdef ST7735S_REG_ACCESS
 
