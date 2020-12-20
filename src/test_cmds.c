@@ -1659,6 +1659,7 @@ static void test_misc()
 	double d4, d5, d6, d6_sqrt;
 	int d7;
 	int i;
+	uint16_t cnt1, cnt2;
 
 	FIX_T f1, f2, f3;
 	FIX_T f4, f5, f6;
@@ -1707,6 +1708,16 @@ static void test_misc()
 	d6_sqrt = sqrt(d6);
 	tm_d = timer_soft_count(&tm);
 	printf("sqrt(d6) = %f, Elapsed time : %d\r\n", d6_sqrt, tm_d);
+
+	// division of double
+	d4 = 100;
+	for(i = 0; i < 10; i++){
+		cnt1 = ADXL345_INT_CNTR;
+		d5 = (10+i) / d4;
+		cnt2 = ADXL345_INT_CNTR;
+		printf("(10+%d)/100 = %f, Elapsed time : %d\r\n", i, d5, cnt2-cnt1);
+	}
+
 
 }
 

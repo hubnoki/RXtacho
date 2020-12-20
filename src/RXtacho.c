@@ -302,12 +302,30 @@ void adxl345_int_routine()
 			if(vars.g_buf_wp_a < N_GBUF){
 				vars.g_buf_a[vars.g_buf_wp_a] = fix_int2fix((int)d[vars.axis_sel]);
 				vars.g_buf_wp_a++;
+				if(vars.g_buf_wp_a == N_GBUF-1){
+					// Measure the interval to fill the buffer
+					vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
+					vars.g_int_cnt_last = int_cnt;
+				}
+			}
+			else{
+				// Update last counter value while waiting for buffer read
+				vars.g_int_cnt_last = int_cnt;
 			}
 		}
 		else{
 			if(vars.g_buf_wp_b < N_GBUF){
 				vars.g_buf_b[vars.g_buf_wp_b] = fix_int2fix((int)d[vars.axis_sel]);;
 				vars.g_buf_wp_b++;
+				if(vars.g_buf_wp_b == N_GBUF-1){
+					// Measure the interval to fill the buffer
+					vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
+					vars.g_int_cnt_last = int_cnt;
+				}
+			}
+			else{
+				// Update last counter value while waiting for buffer read
+				vars.g_int_cnt_last = int_cnt;
 			}
 		}
 	}
@@ -430,13 +448,11 @@ static double fix_cabs(FIX_T *f)
 	double d1, d2;
 
 	i1 = fix_fix2int(f[0]); // Re
-	d1 = i1;
-	d1 *= i1; // Re^2
+	d1 = i1 * i1;// Re^2
 	d2 = d1;
 
 	i1 = fix_fix2int(f[1]); // Im
-	d1 = i1;
-	d1 *= i1; // Im^2
+	d1 = i1 * i1; // Im^2
 	d2 += d1;
 
 	return sqrt(d2);
@@ -896,6 +912,7 @@ static void proc_FFT(uint8_t spush, uint8_t lpush)
 		vars.g_buf_sel = SEL_A;
 		vars.g_buf_wp_a = 0;
 		vars.g_buf_wp_b = 0;
+		vars.g_int_cnt_last = ADXL345_INT_CNTR;
 		adxl345_start();
 		vars.mode_init = 0;
 	}
@@ -948,19 +965,168 @@ static void proc_FFT(uint8_t spush, uint8_t lpush)
 //-------------------------------------------------------------------------------------------
 // Process for meter mode 
 //-------------------------------------------------------------------------------------------
+
+
+const double tbl_spectrum_ratio[] = 
+{
+	0.33333
+	, 0.37931
+	, 0.42857
+	, 0.48148
+	, 0.53846
+	, 0.60000
+	, 0.66667
+	, 0.73913
+	, 0.81818
+	, 0.90476
+	, 1.00000
+	, 1.10526
+	, 1.22222
+	, 1.35294
+	, 1.50000
+	, 1.66667
+	, 1.85714
+	, 2.07692
+	, 2.33333
+	, 2.63636
+	, 3.00000
+};
+
+#define N_SPECTRUM_RATIO (sizeof(tbl_spectrum_ratio)/sizeof(double))
+#define SPECTRUM_FRAC_UNIT ((double)1.0/N_SPECTRUM_RATIO)
+#define MAX_FREQ_IDX 64
+
+static int calc_rpm(FIX_T *fft_result, double df)
+{
+	int i;
+	FIX_T *p = fft_result + 2;
+	double amp;
+	double amp_max = 0;
+	int idx_max = 0;
+	double amp_max_m1, amp_max_p1;
+	double amp_mean = 0;
+	bool updated_max = false;
+	double amp_ratio;
+	double frac;
+	int rtn;
+
+	// Find the index with maximum amplitude (Except DC level)
+	for(i = 1; i < MAX_FREQ_IDX; i++){
+
+		amp = fix_cabs(p);
+		p += 2;
+		amp_mean += amp;
+
+		if(updated_max){
+			amp_max_p1 = amp;
+		}
+
+		if(amp > amp_max){
+			amp_max_m1 = amp_max;
+			amp_max = amp;
+			idx_max = i;
+			updated_max = true;
+		}
+		else{
+			updated_max = false;
+		}
+	}
+	amp_mean /= (MAX_FREQ_IDX-1);
+
+//	PRINTF("%f, %d, %f, %f, %f\r\n", amp_max, idx_max, amp_max_m1, amp_max_p1, amp_mean);
+
+	// Find the fractional value of the actual frequency
+	// Calculate rpm
+	frac = -1.0;
+	if((amp_max_p1 > amp_mean) && (amp_max_m1 > amp_mean)){
+		amp_ratio = amp_max_p1 / amp_max_m1;
+		for(i = 0; i < N_SPECTRUM_RATIO; i++){
+			if(amp_ratio < tbl_spectrum_ratio[i]){
+				rtn = (int)((idx_max + frac) * df * 60);
+				// PRINTF("%d, %f\r\n", i, amp_ratio);
+				break;
+			}
+			frac += SPECTRUM_FRAC_UNIT;
+			if(i == N_SPECTRUM_RATIO-1)
+				rtn = (int)(idx_max * df * 60);
+		}
+	}
+	else{
+		rtn = (int)(idx_max * df * 60);
+	}
+
+	return rtn;
+
+}
+
 static void proc_meter(uint8_t spush, uint8_t lpush)
 {
+	int i;
+	int rpm;
+	char s[10];
+	unsigned int tm, tm_d;
+
 	if(vars.mode_init){
+		adxl345_stop();
 		lcdc_fill_area(LCDC_BLACK, 0, LCDC_ROW-1, 0, LCDC_COL-1);
 		lcdc_puts("METER mode", LCDC_WHITE, 0, 0);
+		lcdc_puts_x4("rpm", LCDC_GREEN, 88, 48);
+		vars.g_buf_sel = SEL_A;
+		vars.g_buf_wp_a = 0;
+		vars.g_buf_wp_b = 0;
+		vars.g_int_cnt_last = ADXL345_INT_CNTR;
+		adxl345_start();
 		vars.mode_init = 0;
 	}
 
-	// Mode change
+	if(vars.g_buf_sel == SEL_A){
+		if(vars.g_buf_wp_a == N_GBUF){
+//t			timer_soft_reset(&tm);
+			vars.g_buf_sel = SEL_B;
+			// for(i = 0; i < 512; i++)
+			// 	vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
+			rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
+
+			//// Calculate and display rotation frequency
+			rpm = calc_rpm(vars.g_buf_a, (1.0 / 25.6e-6) / (double)(vars.g_int_intvl));
+			if(rpm > 10000) rpm = 9999;
+			sprintf(s, "%4d", rpm/10*10);
+			lcdc_puts_x4(s, LCDC_GREEN, 0, 48);
+
+//t			tm_d = timer_soft_count(&tm);
+//t			PRINTF("Elapsed : %d\r\n", tm_d);
+
+			vars.g_buf_wp_a = 0;
+		}
+	}
+	else{
+		if(vars.g_buf_wp_b == N_GBUF){
+//t			timer_soft_reset(&tm);
+			vars.g_buf_sel = SEL_A;
+			// for(i = 0; i < 512; i++)
+			// 	vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
+			rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
+
+			//// Calculate and display rotation frequency
+			rpm = calc_rpm(vars.g_buf_b, (1.0 / 25.6e-6) / (double)(vars.g_int_intvl));
+			if(rpm > 10000) rpm = 9999;
+			sprintf(s, "%4d", rpm/10*10);
+			lcdc_puts_x4(s, LCDC_GREEN, 0, 48);
+
+//t			tm_d = timer_soft_count(&tm);
+//t			PRINTF("Elapsed : %d\r\n", tm_d);
+
+			vars.g_buf_wp_b = 0;
+		}
+	}
+
 	if(lpush){
+		// Mode change
+		adxl345_stop();
 		vars.mode = MODE_SETTING;
 		vars.mode_init = 1;
 	}
+
 }
 
 //-------------------------------------------------------------------------------------------
