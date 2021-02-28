@@ -298,36 +298,31 @@ void adxl345_int_routine()
 		vars.g_buf_wcnt_a++;
 	}
 	else{
+		uint16_t *wp;
+		FIX_T *buf;
 		if(vars.g_buf_sel == SEL_A){
-			if(vars.g_buf_wp_a < N_GBUF){
-				vars.g_buf_a[vars.g_buf_wp_a] = fix_int2fix((int)d[vars.axis_sel]);
-				vars.g_buf_wp_a++;
-				if(vars.g_buf_wp_a == N_GBUF-1){
-					// Measure the interval to fill the buffer
-					vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
-					vars.g_int_cnt_last = int_cnt;
-				}
-			}
-			else{
-				// Update last counter value while waiting for buffer read
+			wp = &vars.g_buf_wp_a;
+			buf = vars.g_buf_a;
+		}
+		else{
+			wp = &vars.g_buf_wp_b;
+			buf = vars.g_buf_b;
+		}
+
+		if(*wp < N_GBUF){
+			buf[*wp] = fix_int2fix((int)d[vars.axis_sel]);
+			(*wp)++;
+			if(*wp == N_GBUF-1){
+				// Measure the interval to fill the buffer
+				vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
 				vars.g_int_cnt_last = int_cnt;
 			}
 		}
 		else{
-			if(vars.g_buf_wp_b < N_GBUF){
-				vars.g_buf_b[vars.g_buf_wp_b] = fix_int2fix((int)d[vars.axis_sel]);;
-				vars.g_buf_wp_b++;
-				if(vars.g_buf_wp_b == N_GBUF-1){
-					// Measure the interval to fill the buffer
-					vars.g_int_intvl = int_cnt - vars.g_int_cnt_last;
-					vars.g_int_cnt_last = int_cnt;
-				}
-			}
-			else{
-				// Update last counter value while waiting for buffer read
-				vars.g_int_cnt_last = int_cnt;
-			}
+			// Update last counter value while waiting for buffer read
+			vars.g_int_cnt_last = int_cnt;
 		}
+
 	}
 }
 
@@ -904,6 +899,8 @@ static void proc_logging(uint8_t spush, uint8_t lpush)
 static void proc_FFT(uint8_t spush, uint8_t lpush)
 {
 	int i;
+	uint16_t *wp;
+	FIX_T *buf;
 
 	if(vars.mode_init){
 		adxl345_stop();
@@ -918,34 +915,29 @@ static void proc_FFT(uint8_t spush, uint8_t lpush)
 	}
 
 	if(vars.g_buf_sel == SEL_A){
-		if(vars.g_buf_wp_a == N_GBUF){
-			vars.g_buf_sel = SEL_B;
-			for(i = 0; i < 512; i++)
-				vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
-			rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
-			if(vars.fft_disp_scale == 0)
-				FFT_set_scale(vars.g_buf_a);
-			lcdc_fill_area(LCDC_BLACK, 0, 127, 8, 119);
-			lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
-			lcdc_draw_curve(FFT_curve_a, 120, 1, LCDC_GREEN
-				, 0, 127, 9, 120);
-			vars.g_buf_wp_a = 0;
-		}
+		wp = &vars.g_buf_wp_a;
+		buf = vars.g_buf_a;
 	}
 	else{
-		if(vars.g_buf_wp_b == N_GBUF){
-			vars.g_buf_sel = SEL_A;
-			for(i = 0; i < 512; i++)
-				vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
-			rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
-			if(vars.fft_disp_scale == 0)
-				FFT_set_scale(vars.g_buf_b);
-			lcdc_fill_area(LCDC_BLACK, 0, 127, 8, 119);
-			lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
-			lcdc_draw_curve(FFT_curve_b, 120, 1, LCDC_GREEN
-				, 0, 127, 9, 120);
-			vars.g_buf_wp_b = 0;
-		}
+		wp = &vars.g_buf_wp_b;
+		buf = vars.g_buf_b;
+	}
+
+	if(*wp == N_GBUF){
+		// Toggle buffer to write
+		vars.g_buf_sel = (vars.g_buf_sel == SEL_B) ? SEL_A : SEL_B;
+		for(i = 0; i < 512; i++)
+			buf[i] = fix_mul(buf[i], han_window_fix16_512[i]); // Window function
+		rdft_fix(N_GBUF, -1, buf, vars.fft_ip, vars.fft_w);
+		if(vars.fft_disp_scale == 0)
+			FFT_set_scale(buf);
+		lcdc_fill_area(LCDC_BLACK, 0, 127, 8, 119);
+		lcdc_fill_area(0x8410, 0,127,120,120); // Zero level line
+		if(vars.g_buf_sel == SEL_B)
+			lcdc_draw_curve(FFT_curve_a, 120, 1, LCDC_GREEN, 0, 127, 9, 120);
+		else
+			lcdc_draw_curve(FFT_curve_b, 120, 1, LCDC_GREEN, 0, 127, 9, 120);
+		*wp = 0;
 	}
 
 	if(spush){
@@ -1065,6 +1057,8 @@ static void proc_meter(uint8_t spush, uint8_t lpush)
 	int rpm;
 	char s[10];
 	unsigned int tm, tm_d;
+	uint16_t *wp;
+	FIX_T *buf;
 
 	if(vars.mode_init){
 		adxl345_stop();
@@ -1080,44 +1074,32 @@ static void proc_meter(uint8_t spush, uint8_t lpush)
 	}
 
 	if(vars.g_buf_sel == SEL_A){
-		if(vars.g_buf_wp_a == N_GBUF){
-//t			timer_soft_reset(&tm);
-			vars.g_buf_sel = SEL_B;
-			// for(i = 0; i < 512; i++)
-			// 	vars.g_buf_a[i] = fix_mul(vars.g_buf_a[i], han_window_fix16_512[i]); // Window function
-			rdft_fix(N_GBUF, -1, vars.g_buf_a, vars.fft_ip, vars.fft_w);
-
-			//// Calculate and display rotation frequency
-			rpm = calc_rpm(vars.g_buf_a, (1.0 / 25.6e-6) / (double)(vars.g_int_intvl));
-			if(rpm > 10000) rpm = 9999;
-			sprintf(s, "%4d", rpm/10*10);
-			lcdc_puts_x4(s, LCDC_GREEN, 0, 48);
-
-//t			tm_d = timer_soft_count(&tm);
-//t			PRINTF("Elapsed : %d\r\n", tm_d);
-
-			vars.g_buf_wp_a = 0;
-		}
+		wp = &vars.g_buf_wp_a;
+		buf = vars.g_buf_a;
 	}
 	else{
-		if(vars.g_buf_wp_b == N_GBUF){
-//t			timer_soft_reset(&tm);
-			vars.g_buf_sel = SEL_A;
-			// for(i = 0; i < 512; i++)
-			// 	vars.g_buf_b[i] = fix_mul(vars.g_buf_b[i], han_window_fix16_512[i]); // Window function
-			rdft_fix(N_GBUF, -1, vars.g_buf_b, vars.fft_ip, vars.fft_w);
+		wp = &vars.g_buf_wp_b;
+		buf = vars.g_buf_b;
+	}
 
-			//// Calculate and display rotation frequency
-			rpm = calc_rpm(vars.g_buf_b, (1.0 / 25.6e-6) / (double)(vars.g_int_intvl));
-			if(rpm > 10000) rpm = 9999;
-			sprintf(s, "%4d", rpm/10*10);
-			lcdc_puts_x4(s, LCDC_GREEN, 0, 48);
+	if(*wp == N_GBUF){
+//t		timer_soft_reset(&tm);
+		// Toggle buffer to write
+		vars.g_buf_sel = (vars.g_buf_sel == SEL_B) ? SEL_A : SEL_B;
+		// for(i = 0; i < 512; i++)
+		// 	buf[i] = fix_mul(buf[i], han_window_fix16_512[i]); // Window function
+		rdft_fix(N_GBUF, -1, buf, vars.fft_ip, vars.fft_w);
 
-//t			tm_d = timer_soft_count(&tm);
-//t			PRINTF("Elapsed : %d\r\n", tm_d);
+		//// Calculate and display rotation frequency
+		rpm = calc_rpm(buf, (1.0 / 25.6e-6) / (double)(vars.g_int_intvl));
+		if(rpm > 10000) rpm = 9999;
+		sprintf(s, "%4d", rpm/10*10);
+		lcdc_puts_x4(s, LCDC_GREEN, 0, 48);
 
-			vars.g_buf_wp_b = 0;
-		}
+//t		tm_d = timer_soft_count(&tm);
+//t		PRINTF("Elapsed : %d\r\n", tm_d);
+
+		*wp = 0;
 	}
 
 	if(lpush){
